@@ -44,4 +44,4 @@ jobs:
         run: "bundle install && gem install --no-document toys"
       - name: Run ${{ matrix.tool || 'test' }}
         shell: bash
-        run: toys do "${{ matrix.tool || 'test' }}" < /dev/null
+        run: toys do ${{ matrix.tool || 'test' }} < /dev/null
