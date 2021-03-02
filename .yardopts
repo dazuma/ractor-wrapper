@@ -1,0 +1,10 @@
+--no-private
+--title=Ractor::Wrapper
+--markup=markdown
+--markup-provider redcarpet
+--main=README.md
+./lib/ractor/wrapper.rb
+-
+README.md
+LICENSE.md
+CHANGELOG.md

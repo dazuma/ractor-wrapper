@@ -1,0 +1,144 @@
+AllCops:
+  NewCops: disable
+  SuggestExtensions: false
+  TargetRubyVersion: 3.0
+
+Gemspec/DateAssignment:
+  Enabled: true
+Layout/EmptyLineAfterGuardClause:
+  Enabled: false
+Layout/LineLength:
+  Max: 100
+  Exclude:
+    - "*.gemspec"
+Layout/SpaceBeforeBrackets:
+  Enabled: true
+Layout/SpaceInsideHashLiteralBraces:
+  Enabled: false
+Lint/AmbiguousAssignment:
+  Enabled: true
+Lint/DeprecatedConstants:
+  Enabled: true
+Lint/DuplicateBranch:
+  Enabled: true
+Lint/DuplicateRegexpCharacterClassElement:
+  Enabled: true
+Lint/EmptyBlock:
+  Enabled: true
+Lint/EmptyClass:
+  Enabled: true
+Lint/LambdaWithoutLiteralBlock:
+  Enabled: true
+Lint/NoReturnInBeginEndBlocks:
+  Enabled: true
+Lint/NumberedParameterAssignment:
+  Enabled: true
+Lint/OrAssignmentToConstant:
+  Enabled: true
+Lint/RaiseException:
+  Enabled: true
+Lint/RedundantDirGlobSort:
+  Enabled: true
+Lint/StructNewOverride:
+  Enabled: true
+Lint/SymbolConversion:
+  Enabled: true
+Lint/ToEnumArguments:
+  Enabled: true
+Lint/TripleQuotes:
+  Enabled: true
+Lint/UnexpectedBlockArity:
+  Enabled: true
+Lint/UnmodifiedReduceAccumulator:
+  Enabled: true
+Metrics/AbcSize:
+  Max: 25
+Metrics/BlockLength:
+  Exclude:
+    - "test/**/*"
+    - "*.gemspec"
+Metrics/BlockNesting:
+  Exclude:
+    - "test/**/*"
+Metrics/ClassLength:
+  Max: 500
+Metrics/CyclomaticComplexity:
+  Max: 10
+Metrics/MethodLength:
+  Max: 25
+Metrics/ModuleLength:
+  Max: 500
+Metrics/ParameterLists:
+  Enabled: false
+Metrics/PerceivedComplexity:
+  Max: 10
+Naming/FileName:
+  Exclude:
+    - "lib/ractor-wrapper.rb"
+Style/AccessorGrouping:
+  EnforcedStyle: separated
+Style/ArgumentsForwarding:
+  Enabled: true
+Style/BlockDelimiters:
+  Exclude:
+    - "test/**/*"
+Style/CaseEquality:
+  Enabled: false
+Style/CollectionCompact:
+  Enabled: true
+Style/DocumentDynamicEvalDefinition:
+  Enabled: true
+Style/Documentation:
+  Exclude:
+    - "test/**/*"
+Style/DocumentationMethod:
+  Enabled: true
+  Exclude:
+    - ".toys.rb"
+    - "test/**/*"
+Style/EndlessMethod:
+  Enabled: true
+Style/FrozenStringLiteralComment:
+  Enabled: false
+Style/GuardClause:
+  Enabled: false
+Style/HashConversion:
+  Enabled: true
+Style/HashEachMethods:
+  Enabled: true
+Style/HashExcept:
+  Enabled: true
+Style/HashTransformKeys:
+  Enabled: false
+Style/HashTransformValues:
+  Enabled: false
+Style/IfUnlessModifier:
+  Enabled: false
+Style/IfWithBooleanLiteralBranches:
+  Enabled: true
+Style/NegatedIfElseCondition:
+  Enabled: true
+Style/Next:
+  Enabled: false
+Style/NilLambda:
+  Enabled: true
+Style/NumericLiterals:
+  Enabled: false
+Style/RedundantArgument:
+  Enabled: true
+Style/StderrPuts:
+  Enabled: false
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+Style/SwapValues:
+  Enabled: true
+Style/SymbolArray:
+  EnforcedStyle: brackets
+Style/TrailingCommaInArrayLiteral:
+  EnforcedStyleForMultiline: comma
+Style/TrailingCommaInHashLiteral:
+  EnforcedStyleForMultiline: comma
+Style/WhileUntilModifier:
+  Enabled: false
+Style/WordArray:
+  EnforcedStyle: brackets
