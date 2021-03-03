@@ -50,43 +50,45 @@ The following example shows how to share a single `Faraday::Conection`
 object among multiple Ractors. Because `Faraday::Connection` is not itself
 thread-safe, this example serializes all calls to it.
 
-    require "faraday"
-    require "ractor/wrapper"
+```ruby
+require "faraday"
+require "ractor/wrapper"
 
-    # Create a Faraday connection and a wrapper for it.
-    connection = Faraday.new "http://example.com"
-    wrapper = Ractor::Wrapper.new(connection)
+# Create a Faraday connection and a wrapper for it.
+connection = Faraday.new "http://example.com"
+wrapper = Ractor::Wrapper.new(connection)
 
-    # At this point, the connection ojbect cannot be accessed directly
-    # because it has been "moved" to the wrapper's internal Ractor.
-    #     connection.get("/whoops")  # <= raises an error
+# At this point, the connection ojbect cannot be accessed directly
+# because it has been "moved" to the wrapper's internal Ractor.
+#     connection.get("/whoops")  # <= raises an error
 
-    # However, any number of Ractors can now access it through the wrapper.
-    # By default, access to the object is serialized; methods will not be
-    # invoked concurrently. (To allow concurrent access, set up threads when
-    # creating the wrapper.)
-    r1 = Ractor.new(wrapper) do |w|
-      10.times do
-        w.stub.get("/hello")
-      end
-      :ok
-    end
-    r2 = Ractor.new(wrapper) do |w|
-      10.times do
-        w.stub.get("/ruby")
-      end
-      :ok
-    end
+# However, any number of Ractors can now access it through the wrapper.
+# By default, access to the object is serialized; methods will not be
+# invoked concurrently. (To allow concurrent access, set up threads when
+# creating the wrapper.)
+r1 = Ractor.new(wrapper) do |w|
+  10.times do
+    w.stub.get("/hello")
+  end
+  :ok
+end
+r2 = Ractor.new(wrapper) do |w|
+  10.times do
+    w.stub.get("/ruby")
+  end
+  :ok
+end
 
-    # Wait for the two above Ractors to finish.
-    r1.take
-    r2.take
+# Wait for the two above Ractors to finish.
+r1.take
+r2.take
 
-    # After you stop the wrapper, you can retrieve the underlying
-    # connection object and access it directly again.
-    wrapper.async_stop
-    connection = wrapper.recover_object
-    connection.get("/finally")
+# After you stop the wrapper, you can retrieve the underlying
+# connection object and access it directly again.
+wrapper.async_stop
+connection = wrapper.recover_object
+connection.get("/finally")
+```
 
 ### Features
 
@@ -127,7 +129,7 @@ Development is done in GitHub at https://github.com/dazuma/ractor-wrapper.
 
 The library uses [toys](https://dazuma.github.io/toys) for testing and CI. To
 run the test suite, `gem install toys` and then run `toys ci`. You can also run
-unit tests, rubocop, and builds independently.    
+unit tests, rubocop, and builds independently.
 
 ## License
 
