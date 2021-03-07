@@ -76,7 +76,7 @@ describe ::Ractor::Wrapper do
     end
   end
 
-  describe "nonthreaded lifecycle" do
+  describe "single-thread lifecycle" do
     let(:wrapper) { Ractor::Wrapper.new(remote) }
 
     after { wrapper.async_stop }
