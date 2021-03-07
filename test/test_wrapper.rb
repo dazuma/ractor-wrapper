@@ -53,6 +53,29 @@ describe ::Ractor::Wrapper do
     end
   end
 
+  describe "stubs" do
+    let(:wrapper) { Ractor::Wrapper.new(remote) }
+
+    after { wrapper.async_stop }
+
+    it "converts method calls with arguments and return values" do
+      result = wrapper.stub.echo_args(1, 2, a: "b", c: "d")
+      assert_equal("[1, 2], {:a=>\"b\", :c=>\"d\"}", result)
+    end
+
+    it "converts exceptions" do
+      exception = assert_raises(RuntimeError) do
+        wrapper.stub.fail
+      end
+      assert_equal("Whoops", exception.message)
+    end
+
+    it "converts respond_to" do
+      assert(wrapper.stub.respond_to?(:echo_args))
+      refute(wrapper.stub.respond_to?(:nonexistent_method))
+    end
+  end
+
   describe "nonthreaded lifecycle" do
     let(:wrapper) { Ractor::Wrapper.new(remote) }
 

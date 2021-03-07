@@ -45,7 +45,7 @@ class Ractor
   #     connection = Faraday.new "http://example.com"
   #     wrapper = Ractor::Wrapper.new(connection)
   #
-  #     # At this point, the connection ojbect cannot be accessed directly
+  #     # At this point, the connection object cannot be accessed directly
   #     # because it has been "moved" to the wrapper's internal Ractor.
   #     #     connection.get("/whoops")  # <= raises an error
   #
@@ -343,14 +343,18 @@ class Ractor
 
       ##
       # Forward calls to {Ractor::Wrapper#call}.
+      # @private
       #
       def method_missing(name, *args, **kwargs)
         @wrapper.call(name, *args, **kwargs)
       end
 
+      ##
+      # Forward respond_to queries.
       # @private
+      #
       def respond_to_missing?(name, include_all)
-        @wrapper.respond_to?(name, include_all)
+        @wrapper.call(:respond_to?, name, include_all)
       end
     end
 

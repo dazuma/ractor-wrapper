@@ -59,7 +59,7 @@ require "ractor/wrapper"
 connection = Faraday.new "http://example.com"
 wrapper = Ractor::Wrapper.new(connection)
 
-# At this point, the connection ojbect cannot be accessed directly
+# At this point, the connection object cannot be accessed directly
 # because it has been "moved" to the wrapper's internal Ractor.
 #     connection.get("/whoops")  # <= raises an error
 
