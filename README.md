@@ -16,18 +16,19 @@ Require it in your code:
 
 You can then create wrappers for objects. See the example below.
 
-Ractor::Wrapper requires Ruby 3.0.0 or later.
+`Ractor::Wrapper` requires Ruby 3.0.0 or later.
 
-WARNING: This is a highly experimental library, and not currently intended for
-production use. (As of Ruby 3.0.0, the same can be said of Ractors in general.)
+WARNING: This is a highly experimental library, and currently _not_ recommended
+for production use. (As of Ruby 3.0.0, the same can be said of Ractors in
+general.)
 
 ## About Ractor::Wrapper
 
 Ractors for the most part cannot access objects concurrently with other
 Ractors unless the object is _shareable_ (that is, deeply immutable along
-with a few other restrictions.) If multiple Ractors need to access a shared
-resource that is stateful or otherwise not Ractor-shareable, that resource
-must itself be a Ractor.
+with a few other restrictions.) If multiple Ractors need to interact with a
+shared resource that is stateful or otherwise not Ractor-shareable, that
+resource must itself be implemented and accessed as a Ractor.
 
 `Ractor::Wrapper` makes it possible for such a shared resource to be
 implemented as an ordinary object and accessed using ordinary method calls. It
@@ -95,6 +96,8 @@ connection.get("/finally")
 *   Provides a method interface to an object running in a different Ractor.
 *   Supports arbitrary method arguments and return values.
 *   Supports exceptions thrown by the method.
+*   Can be configured to copy or move arguments, return values, and
+    exceptions, per method.
 *   Can serialize method calls for non-concurrency-safe objects, or run
     methods concurrently in multiple worker threads for thread-safe objects.
 *   Can gracefully shut down the wrapper and retrieve the original object.

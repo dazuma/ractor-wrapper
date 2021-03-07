@@ -21,6 +21,38 @@ describe ::Ractor::Wrapper do
     end
   end
 
+  describe "method configuration" do
+    after { @wrapper&.async_stop }
+
+    it "copies arguments by default" do
+      @wrapper = Ractor::Wrapper.new(remote)
+      str = "hello"
+      @wrapper.call(:echo_args, str)
+      str.to_s
+    end
+
+    it "moves arguments when move_arguments is set to true" do
+      @wrapper = Ractor::Wrapper.new(remote, move_arguments: true)
+      str = "hello"
+      @wrapper.call(:echo_args, str)
+      assert_raises(Ractor::MovedError) { str.to_s }
+    end
+
+    it "moves arguments when move is set to true" do
+      @wrapper = Ractor::Wrapper.new(remote, move: true)
+      str = "hello"
+      @wrapper.call(:echo_args, str)
+      assert_raises(Ractor::MovedError) { str.to_s }
+    end
+
+    it "honors move_arguments over move" do
+      @wrapper = Ractor::Wrapper.new(remote, move: true, move_arguments: false)
+      str = "hello"
+      @wrapper.call(:echo_args, str)
+      str.to_s
+    end
+  end
+
   describe "nonthreaded lifecycle" do
     let(:wrapper) { Ractor::Wrapper.new(remote) }
 

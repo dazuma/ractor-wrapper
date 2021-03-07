@@ -6,13 +6,17 @@ class Ractor
   # An experimental class that wraps a non-shareable object, allowing multiple
   # Ractors to access it concurrently.
   #
+  # WARNING: This is a highly experimental library, and currently _not_
+  # recommended for production use. (As of Ruby 3.0.0, the same can be said of
+  # Ractors in general.)
+  #
   # ## What is Ractor::Wrapper?
   #
   # Ractors for the most part cannot access objects concurrently with other
   # Ractors unless the object is _shareable_ (that is, deeply immutable along
-  # with a few other restrictions.) If multiple Ractors need to access a shared
-  # resource that is stateful or otherwise not Ractor-shareable, that resource
-  # must itself be implemented and accessed as a Ractor.
+  # with a few other restrictions.) If multiple Ractors need to interact with a
+  # shared resource that is stateful or otherwise not Ractor-shareable, that
+  # resource must itself be implemented and accessed as a Ractor.
   #
   # `Ractor::Wrapper` makes it possible for such a shared resource to be
   # implemented as an object and accessed using ordinary method calls. It does
@@ -76,6 +80,8 @@ class Ractor
   # *   Provides a method interface to an object running in a different Ractor.
   # *   Supports arbitrary method arguments and return values.
   # *   Supports exceptions thrown by the method.
+  # *   Can be configured to copy or move arguments, return values, and
+  #     exceptions, per method.
   # *   Can serialize method calls for non-concurrency-safe objects, or run
   #     methods concurrently in multiple worker threads for thread-safe objects.
   # *   Can gracefully shut down the wrapper and retrieve the original object.
@@ -109,16 +115,31 @@ class Ractor
     # @param threads [Integer,nil] The number of worker threads to run.
     #     Defaults to `nil`, which causes the worker to serialize calls.
     #
-    def initialize(object, threads: nil, logging: false, name: nil)
+    def initialize(object,
+                   threads: nil,
+                   move: false,
+                   move_arguments: nil,
+                   move_return: nil,
+                   logging: false,
+                   name: nil)
+      @method_settings = {}
       self.threads = threads
       self.logging = logging
       self.name = name
+      configure_method(move: move, move_arguments: move_arguments, move_return: move_return)
       yield self if block_given?
+      @method_settings.freeze
 
       maybe_log("Starting server")
       @ractor = ::Ractor.new(name: name) { Server.new.run }
-      opts = {name: @name, threads: @threads, logging: @logging}
-      @ractor.send([object, opts], move: true)
+      opts = {
+        object: object,
+        threads: @threads,
+        method_settings: @method_settings,
+        name: @name,
+        logging: @logging,
+      }
+      @ractor.send(opts, move: true)
 
       maybe_log("Server ready")
       @stub = Stub.new(self)
@@ -129,10 +150,12 @@ class Ractor
     # Set the number of threads to run in the wrapper. If the underlying object
     # is thread-safe, this allows concurrent calls to it. If the underlying
     # object is not thread-safe, you should leave this set to `nil`, which will
-    # cause calls to be serialized. Setting the thread count to 1 is
-    # effectively the same as no threading.
+    # cause calls to be serialized. Setting the thread count to 1 will actually
+    # spawn a single thread, although this is effectively the same as no
+    # threading since a single thread will serialize calls.
     #
     # This method can be called only during an initialization block.
+    # All settings are frozen once the wrapper is active.
     #
     # @param value [Integer,nil]
     #
@@ -150,6 +173,7 @@ class Ractor
     # Enable or disable internal debug logging.
     #
     # This method can be called only during an initialization block.
+    # All settings are frozen once the wrapper is active.
     #
     # @param value [Boolean]
     #
@@ -158,14 +182,42 @@ class Ractor
     end
 
     ##
-    # Set the name of this wrapper, shown in logging.
+    # Set the name of this wrapper. This is shown in logging, and is also used
+    # as the name of the wrapping Ractor.
     #
     # This method can be called only during an initialization block.
+    # All settings are frozen once the wrapper is active.
     #
     # @param value [String, nil]
     #
     def name=(value)
       @name = value ? value.to_s.freeze : nil
+    end
+
+    ##
+    # Configure the move semantics for the given method (or the default
+    # settings if no method name is given.) That is, determine whether
+    # arguments, return values, and/or exceptions are copied or moved when
+    # communicated with the wrapper. By default, all objects are copied.
+    #
+    # This method can be called only during an initialization block.
+    # All settings are frozen once the wrapper is active.
+    #
+    # @param method_name [Symbol, nil] The name of the method being configured,
+    #     or `nil` to set defaults for all methods not configured explicitly.
+    # @param move [Boolean] Whether to move all communication. This value, if
+    #     given, is used if `move_arguments`, `move_return`, or
+    #     `move_exceptions` are not set.
+    # @param move_arguments [Boolean] Whether to move arguments.
+    # @param move_return [Boolean] Whether to move return values.
+    #
+    def configure_method(method_name = nil,
+                         move: false,
+                         move_arguments: nil,
+                         move_return: nil)
+      method_name = method_name.to_sym unless method_name.nil?
+      @method_settings[method_name] =
+        MethodSettings.new(move: move, move_arguments: move_arguments, move_return: move_return)
     end
 
     ##
@@ -185,7 +237,7 @@ class Ractor
     attr_reader :threads
 
     ##
-    # Return whether logging is enabled for this wrapper
+    # Return whether logging is enabled for this wrapper.
     #
     # @return [Boolean]
     #
@@ -199,6 +251,20 @@ class Ractor
     attr_reader :name
 
     ##
+    # Return the method settings for the given method name. This returns the
+    # default method settings if the given method is not configured explicitly
+    # by name.
+    #
+    # @param method_name [Symbol,nil] The method name, or `nil` to return the
+    #     defaults.
+    # @return [MethodSettings]
+    #
+    def method_settings(method_name)
+      method_name = method_name.to_sym
+      @method_settings[method_name] || @method_settings[nil]
+    end
+
+    ##
     # A lower-level interface for calling the wrapper.
     #
     # @param method_name [Symbol] The name of the method to call
@@ -209,8 +275,9 @@ class Ractor
     def call(method_name, *args, **kwargs)
       request = Message.new(:call, data: [method_name, args, kwargs])
       transaction = request.transaction
-      maybe_log("Sending method #{method_name} (transaction=#{transaction})")
-      @ractor.send(request, move: true)
+      move = method_settings(method_name).move_arguments?
+      maybe_log("Sending method #{method_name} (move=#{move}, transaction=#{transaction})")
+      @ractor.send(request, move: move)
       reply = ::Ractor.receive_if { |msg| msg.is_a?(Message) && msg.transaction == transaction }
       case reply.type
       when :result
@@ -287,6 +354,44 @@ class Ractor
       end
     end
 
+    ##
+    # Settings for a method
+    #
+    class MethodSettings
+      # @private
+      def initialize(move: false,
+                     move_arguments: nil,
+                     move_return: nil)
+        @move_arguments = interpret_setting(move_arguments, move)
+        @move_return = interpret_setting(move_return, move)
+        freeze
+      end
+
+      ##
+      # @return [Boolean] Whether to move arguments
+      #
+      def move_arguments?
+        @move_arguments
+      end
+
+      ##
+      # @return [Boolean] Whether to move return values
+      #
+      def move_return?
+        @move_return
+      end
+
+      private
+
+      def interpret_setting(setting, default)
+        if setting.nil?
+          default ? true : false
+        else
+          setting ? true : false
+        end
+      end
+    end
+
     # @private
     class Message
       def initialize(type, data: nil, transaction: nil)
@@ -312,9 +417,11 @@ class Ractor
     # @private
     class Server
       def run
-        @object, opts = ::Ractor.receive
+        opts = ::Ractor.receive
+        @object = opts[:object]
         @logging = opts[:logging]
         @name = opts[:name]
+        @method_settings = opts[:method_settings]
         maybe_log("Server started")
 
         queue = start_threads(opts[:threads])
@@ -408,11 +515,13 @@ class Ractor
         method_name, args, kwargs = request.data
         transaction = request.transaction
         sender = request.sender
+        method_settings = @method_settings[method_name] || @method_settings[nil]
         maybe_worker_log(worker_num, "Running method #{method_name} (transaction=#{transaction})")
         begin
           result = @object.send(method_name, *args, **kwargs)
           maybe_worker_log(worker_num, "Sending result (transaction=#{transaction})")
-          sender.send(Message.new(:result, data: result, transaction: transaction), move: true)
+          sender.send(Message.new(:result, data: result, transaction: transaction),
+                      move: method_settings.move_return?)
         rescue ::Exception => e # rubocop:disable Lint/RescueException
           maybe_worker_log(worker_num, "Sending exception (transaction=#{transaction})")
           sender.send(Message.new(:error, data: e, transaction: transaction))
