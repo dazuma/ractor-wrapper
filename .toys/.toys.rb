@@ -20,10 +20,10 @@ expand :gem_build, name: "install", install_gem: true
 tool "ci" do
   desc "Run all CI checks"
 
-  long_desc "The CI tool runs all CI checks for the toys gem, including unit" \
-              " tests, rubocop, and documentation checks. It is useful for" \
-              " running tests in normal development, as well as being the" \
-              " entrypoint for CI systems. Any failure will result in a" \
+  long_desc "The 'ci' tool runs all CI checks, including unit tests," \
+              " rubocop, and documentation checks. It is useful for running" \
+              " tests locally during normal development, as well as being" \
+              " an entrypoint for CI systems. Any failure will result in a" \
               " nonzero result code."
 
   include :exec, result_callback: :handle_result

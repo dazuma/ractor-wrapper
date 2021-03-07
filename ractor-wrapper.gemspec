@@ -17,4 +17,10 @@ require "ractor/wrapper/version"
   spec.require_paths = ["lib"]
 
   spec.required_ruby_version = ">= 3.0"
+
+  spec.metadata["bug_tracker_uri"] = "https://github.com/dazuma/ractor-wrapper/issues"
+  spec.metadata["changelog_uri"] = "https://rubydoc.info/gems/ractor-wrapper/#{::Ractor::Wrapper::VERSION}/file/CHANGELOG.md"
+  spec.metadata["documentation_uri"] = "https://rubydoc.info/gems/ractor-wrapper/#{::Ractor::Wrapper::VERSION}"
+  spec.metadata["homepage_uri"] = "https://github.com/dazuma/ractor-wrapper"
+  spec.metadata["source_code_uri"] = "https://github.com/dazuma/ractor-wrapper"
 end
