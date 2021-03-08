@@ -258,7 +258,7 @@ class Ractor
     end
 
     ##
-    # A lower-level interface for calling the wrapper.
+    # A lower-level interface for calling methods through the wrapper.
     #
     # @param method_name [Symbol] The name of the method to call
     # @param args [arguments] The positional arguments
@@ -301,9 +301,11 @@ class Ractor
     end
 
     ##
-    # Return the original object that was wrapped. The object is returned after
-    # the wrapper finishes stopping. Only one ractor may call this method; any
-    # additional calls will fail.
+    # Retrieves the original object that was wrapped. This should be called
+    # only after a stop request has been issued using {#async_stop}, and may
+    # block until the wrapper has fully stopped.
+    #
+    # Only one ractor may call this method; any additional calls will fail.
     #
     # @return [Object] The original wrapped object
     #
