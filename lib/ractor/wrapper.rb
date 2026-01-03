@@ -5,9 +5,8 @@
 #
 class Ractor
   ##
-  # An experimental class that wraps a non-shareable object, allowing multiple
-  # Ractors to access it concurrently. This can make it possible for Ractors to
-  # share a "plain" object such as a database connection.
+  # An experimental class that wraps a non-shareable object in an actor,
+  # allowing multiple Ractors to access it concurrently.
   #
   # WARNING: This is a highly experimental library, and currently _not_
   # recommended for production use. (As of Ruby 4.0.0, the same can be said of
@@ -15,68 +14,62 @@ class Ractor
   #
   # ## What is Ractor::Wrapper?
   #
-  # Ractors for the most part cannot access objects concurrently with other
-  # Ractors unless the object is _shareable_, which generally means deeply
-  # immutable along with a few other restrictions. If multiple Ractors need to
-  # interact with a shared resource that is stateful or otherwise not shareable
-  # that resource must itself be implemented and accessed as a Ractor.
+  # For the most part, unless an object is _sharable_, which generally means
+  # deeply immutable along with a few other restrictions, it cannot be accessed
+  # directly from another Ractor. This makes it difficult for multiple Ractors
+  # to share a resource that is stateful. Such a resource must typically itself
+  # be implemented as a Ractor and accessed via message passing.
   #
-  # `Ractor::Wrapper` makes it possible for such a shared resource to be
-  # implemented as an object and accessed using ordinary method calls. It does
-  # this by "wrapping" the object in a Ractor, and mapping method calls to
-  # message passing. This may make it easier to implement such a resource with
-  # a simple class rather than a full-blown Ractor with message passing, and it
-  # may also be useful for adapting existing object-based resources.
+  # Ractor::Wrapper makes it possible for an ordinary non-shareable object to
+  # be accessed from multiple Ractors. It does this by "wrapping" the object
+  # with an actor that listens for messages and invokes the object's methods in
+  # a controlled single-Ractor environment. It then provides a stub object that
+  # reproduces the interface of the original object, but responds to method
+  # calls by sending messages to the wrapper. Ractor::Wrapper can be used to
+  # implement simple actors by writing "plain" Ruby objects, or to adapt
+  # existing non-shareable objects to a multi-Ractor world.
   #
-  # Given a shared resource object, `Ractor::Wrapper` starts a new Ractor and
-  # "runs" the object within that Ractor. It provides you with a stub object
-  # on which you can invoke methods. The wrapper responds to these method calls
-  # by sending messages to the internal Ractor, which invokes the shared object
-  # and then sends back the result. If the underlying object is thread-safe,
-  # you can configure the wrapper to run multiple threads that can run methods
-  # concurrently. Or, if not, the wrapper can serialize requests to the object.
+  # ## Net::HTTP example
   #
-  # ## Example usage
-  #
-  # The following example shows how to share a single `Faraday::Conection`
-  # object among multiple Ractors. Because `Faraday::Connection` is not itself
-  # thread-safe, this example serializes all calls to it.
+  # The following example shows how to share a single Net::HTTP session object
+  # among multiple Ractors.
   #
   #     require "ractor/wrapper"
-  #     require "faraday"
+  #     require "net/http"
   #
-  #     # Create a Faraday connection. Faraday connections are not shareable,
+  #     # Create a Net::HTTP session. Net::HTTP sessions are not shareable,
   #     # so normally only one Ractor can access them at a time.
-  #     connection = Faraday.new("http://example.com")
+  #     http = Net::HTTP.new("example.com")
+  #     http.start
   #
-  #     # Create a wrapper around the connection. This starts up an internal
-  #     # Ractor and "moves" the connection object to that Ractor.
-  #     wrapper = Ractor::Wrapper.new(connection)
+  #     # Create a wrapper around the session. This moves the session into an
+  #     # internal Ractor and listens for method call requests. By default, a
+  #     # wrapper serializes calls, handling one at a time, for compatibility
+  #     # with non-thread-safe objects.
+  #     wrapper = Ractor::Wrapper.new(http)
   #
-  #     # At this point, the connection object can no longer be accessed
-  #     # directly because it is now owned by the wrapper's internal Ractor.
-  #     #     connection.get("/whoops")  # <= raises an error
+  #     # At this point, the session object can no longer be accessed directly
+  #     # because it is now owned by the wrapper's internal Ractor.
+  #     #     http.get("/whoops")  # <= raises Ractor::MovedError
   #
-  #     # However, you can access the connection via the stub object provided
-  #     # by the wrapper. This stub proxies the call to the wrapper's internal
+  #     # However, you can access the session via the stub object provided by
+  #     # the wrapper. This stub proxies the call to the wrapper's internal
   #     # Ractor. And it's shareable, so any number of Ractors can use it.
-  #     wrapper.stub.get("/hello")
+  #     response = wrapper.stub.get("/")
   #
   #     # Here, we start two Ractors, and pass the stub to each one. Each
   #     # Ractor can simply call methods on the stub as if it were the original
-  #     # connection object. (Internally, of course, the calls are proxied back
-  #     # to the wrapper.) By default, all calls are serialized. However, if
-  #     # you know that the underlying object is thread-safe, you can configure
-  #     # a wrapper to run calls concurrently.
-  #     r1 = Ractor.new(wrapper.stub) do |conn|
-  #       10.times do
-  #         conn.get("/hello")
+  #     # connection object. Internally, of course, the calls are proxied to
+  #     # the original object via the wrapper, and execution is serialized.
+  #     r1 = Ractor.new(wrapper.stub) do |stub|
+  #       5.times do
+  #         stub.get("/hello")
   #       end
   #       :ok
   #     end
-  #     r2 = Ractor.new(wrapper.stub) do |conn|
-  #       10.times do
-  #         conn.get("/ruby")
+  #     r2 = Ractor.new(wrapper.stub) do |stub|
+  #       5.times do
+  #         stub.get("/ruby")
   #       end
   #       :ok
   #     end
@@ -85,16 +78,74 @@ class Ractor
   #     r1.join
   #     r2.join
   #
-  #     # After you stop the wrapper, you can retrieve the underlying
-  #     # connection object and access it directly again.
+  #     # After you stop the wrapper, you can retrieve the underlying session
+  #     # object and access it directly again.
   #     wrapper.async_stop
-  #     connection = wrapper.recover_object
-  #     connection.get("/finally")
+  #     http = wrapper.recover_object
+  #     http.finish
+  #
+  # ## SQLite3 example
+  #
+  # The following example shows how to share a SQLite3 database among multiple
+  # Ractors.
+  #
+  #     require "ractor/wrapper"
+  #     require "sqlite3"
+  #
+  #     # Create a SQLite3 database. These objects are not shareable, so
+  #     # normally only one Ractor can access them.
+  #     db = SQLite3::Database.new($my_database_path)
+  #
+  #     # Create a wrapper around the database. A SQLite3::Database object
+  #     # cannot be moved between Ractors, so we configure the wrapper to run
+  #     # in the current Ractor. You can also configure it to run multiple
+  #     # worker threads because the database object itself is thread-safe.
+  #     wrapper = Ractor::Wrapper.new(db, use_current_ractor: true, threads: 2)
+  #
+  #     # At this point, the database object can still be accessed directly
+  #     # because it hasn't been moved to a different Ractor.
+  #     rows = db.execute("select * from numbers")
+  #
+  #     # You can also access the database via the stub object provided by the
+  #     # wrapper.
+  #     rows = wrapper.stub.execute("select * from numbers")
+  #
+  #     # Here, we start two Ractors, and pass the stub to each one. The
+  #     # wrapper's two worker threads will handle the requests in the order
+  #     # received.
+  #     r1 = Ractor.new(wrapper.stub) do |db_stub|
+  #       5.times do
+  #         rows = db_stub.execute("select * from numbers")
+  #       end
+  #       :ok
+  #     end
+  #     r2 = Ractor.new(wrapper.stub) do |db_stub|
+  #       5.times do
+  #         rows = db_stub.execute("select * from numbers")
+  #       end
+  #       :ok
+  #     end
+  #
+  #     # Wait for the two above Ractors to finish.
+  #     r1.join
+  #     r2.join
+  #
+  #     # After stopping the wrapper, you can call the join method to wait for
+  #     # it to completely finish.
+  #     wrapper.async_stop
+  #     wrapper.join
+  #
+  #     # When running a wrapper with :use_current_ractor, you do not need to
+  #     # recover the object, because it was never moved. The recover_object
+  #     # method is not available.
+  #     #     db2 = wrapper.recover_object  # <= raises Ractor::Error
   #
   # ## Features
   #
-  # *   Provides a method interface to an object running in its own Ractor.
+  # *   Provides a Ractor-shareable method interface to a non-shareable object.
   # *   Supports arbitrary method arguments and return values.
+  # *   Can be configured to run in its own isolated Ractor or in a Thread in
+  #     the current Ractor.
   # *   Can be configured per method whether to copy or move arguments and
   #     return values.
   # *   Blocks can be run in the calling Ractor or in the object Ractor.
@@ -112,10 +163,10 @@ class Ractor
   #     access any data outside the block. Otherwise, the block must be run in
   #     the calling Ractor.
   # *   Certain types cannot be used as method arguments or return values
-  #     because Ractor does not allow them to be moved between Ractors. These
-  #     include threads, backtraces, and a few others.
-  # *   Any exceptions raised are always copied back to the calling Ractor, and
-  #     the backtrace is cleared out. This is due to
+  #     because they cannot be moved between Ractors. These include threads,
+  #     backtraces, and a few others.
+  # *   Any exceptions raised are always copied (rather than moved) back to the
+  #     calling Ractor, and the backtrace is cleared out. This is due to
   #     https://bugs.ruby-lang.org/issues/21818
   #
   class Wrapper
@@ -158,17 +209,17 @@ class Ractor
     #
     class MethodSettings
       # @private
-      def initialize(move: false,
+      def initialize(move_data: false,
                      move_arguments: nil,
-                     move_result: nil,
-                     execute_block_in_ractor: nil,
+                     move_results: nil,
                      move_block_arguments: nil,
-                     move_block_result: nil)
-        @move_arguments = interpret_setting(move_arguments, move)
-        @move_result = interpret_setting(move_result, move)
-        @execute_block_in_ractor = interpret_setting(execute_block_in_ractor, false)
-        @move_block_arguments = interpret_setting(move_block_arguments, move)
-        @move_block_result = interpret_setting(move_block_result, move)
+                     move_block_results: nil,
+                     execute_blocks_in_place: nil)
+        @move_arguments = interpret_setting(move_arguments, move_data)
+        @move_results = interpret_setting(move_results, move_data)
+        @move_block_arguments = interpret_setting(move_block_arguments, move_data)
+        @move_block_results = interpret_setting(move_block_results, move_data)
+        @execute_blocks_in_place = interpret_setting(execute_blocks_in_place, false)
         freeze
       end
 
@@ -182,15 +233,8 @@ class Ractor
       ##
       # @return [Boolean] Whether to move return values
       #
-      def move_result?
-        @move_result
-      end
-
-      ##
-      # @return [Boolean] Whether to call blocks in-ractor
-      #
-      def execute_block_in_ractor?
-        @execute_block_in_ractor
+      def move_results?
+        @move_results
       end
 
       ##
@@ -203,8 +247,15 @@ class Ractor
       ##
       # @return [Boolean] Whether to move block results
       #
-      def move_block_result?
-        @move_block_result
+      def move_block_results?
+        @move_block_results
+      end
+
+      ##
+      # @return [Boolean] Whether to call blocks in-place
+      #
+      def execute_blocks_in_place?
+        @execute_blocks_in_place
       end
 
       private
@@ -227,53 +278,69 @@ class Ractor
     # The configuration is frozen once the object is constructed.
     #
     # @param object [Object] The non-shareable object to wrap.
+    # @param use_current_ractor [boolean] If true, the wrapper is run in a
+    #     thread in the current Ractor instead of spawning a new Ractor (the
+    #     default behavior). This option can be used if the wrapped object
+    #     cannot be moved or must run in the main Ractor.
     # @param name [String] A name for this wrapper. Used during logging.
-    # @param logging_enabled [boolean] Set to true to enable logging. Default
-    #     is false.
-    # @param thread_count [Integer] The number of worker threads to run.
+    # @param threads [Integer] The number of worker threads to run.
     #     Defaults to 1, which causes the worker to serialize calls into a
     #     single thread.
-    # @param move [boolean] If true, all communication will by default move
-    #     instead of copy arguments and return values. Default is false.
+    # @param move_data [boolean] If true, all communication will by default
+    #     move instead of copy arguments and return values. Default is false.
+    #     This setting can be overridden by other `:move_*` settings.
     # @param move_arguments [boolean] If true, all arguments will be moved
-    #     instead of copied by default. If not set, uses the `:move` setting.
-    # @param move_result [boolean] If true, return values will be moved instead
-    #     of copied by default. If not set, uses the `:move` setting.
+    #     instead of copied by default. If not set, uses the `:move_data`
+    #     setting.
+    # @param move_results [boolean] If true, return values are moved instead of
+    #     copied by default. If not set, uses the `:move_data` setting.
+    # @param move_block_arguments [boolean] If true, arguments to blocks are
+    #     moved instead of copied by default. If not set, uses the `:move_data`
+    #     setting.
+    # @param move_block_results [boolean] If true, result values from blocks
+    #     are moved instead of copied by default. If not set, uses the
+    #     `:move_data` setting.
+    # @param execute_blocks_in_place [boolean] If true, blocks passed to
+    #     methods are made shareable and passed into the wrapper to be executed
+    #     in the wrapped environment. If false (the default), blocks are
+    #     replaced by a proc that passes messages back out to the caller and
+    #     executes the block in the caller's environment.
+    # @param enable_logging [boolean] Set to true to enable logging. Default
+    #     is false.
     #
     def initialize(object,
+                   use_current_ractor: false,
                    name: nil,
-                   logging_enabled: false,
-                   thread_count: 1,
-                   move: false,
+                   threads: 1,
+                   move_data: false,
                    move_arguments: nil,
-                   move_result: nil,
-                   execute_block_in_ractor: nil,
+                   move_results: nil,
                    move_block_arguments: nil,
-                   move_block_result: nil)
-      raise ::Ractor::MovedError, "can not wrap a moved object" if ::Ractor::MovedObject === object
+                   move_block_results: nil,
+                   execute_blocks_in_place: nil,
+                   enable_logging: false)
+      raise ::Ractor::MovedError, "cannot wrap a moved object" if ::Ractor::MovedObject === object
 
       @method_settings = {}
       self.name = name || object_id.to_s
-      self.logging_enabled = logging_enabled
-      self.thread_count = thread_count
-      configure_method(move: move,
+      self.enable_logging = enable_logging
+      self.threads = threads
+      configure_method(move_data: move_data,
                        move_arguments: move_arguments,
-                       move_result: move_result,
-                       execute_block_in_ractor: execute_block_in_ractor,
+                       move_results: move_results,
                        move_block_arguments: move_block_arguments,
-                       move_block_result: move_block_result)
+                       move_block_results: move_block_results,
+                       execute_blocks_in_place: execute_blocks_in_place)
       yield self if block_given?
       @method_settings.freeze
 
-      maybe_log("Starting server")
-      @ractor = ::Ractor.new(self.name, name: "wrapper: #{name}") do |wrapper_name|
-        Server.new(wrapper_name).run
+      if use_current_ractor
+        setup_local_server(object)
+      else
+        setup_isolated_server(object)
       end
-      init_message = InitMessage.new(object: object,
-                                     logging_enabled: self.logging_enabled,
-                                     thread_count: self.thread_count)
-      @ractor.send(init_message, move: true)
       @stub = Stub.new(self)
+
       freeze
     end
 
@@ -288,10 +355,10 @@ class Ractor
     #
     # @param value [Integer]
     #
-    def thread_count=(value)
+    def threads=(value)
       value = value.to_i
       value = 1 if value < 1
-      @thread_count = value
+      @threads = value
     end
 
     ##
@@ -302,8 +369,8 @@ class Ractor
     #
     # @param value [Boolean]
     #
-    def logging_enabled=(value)
-      @logging_enabled = value ? true : false
+    def enable_logging=(value)
+      @enable_logging = value ? true : false
     end
 
     ##
@@ -330,50 +397,41 @@ class Ractor
     #
     # @param method_name [Symbol, nil] The name of the method being configured,
     #     or `nil` to set defaults for all methods not configured explicitly.
-    # @param move [Boolean] Whether to move all communication. This value, if
-    #     given, is used if `move_arguments`, `move_result`, or
-    #     `move_exceptions` are not set.
-    # @param move_arguments [Boolean] Whether to move arguments.
-    # @param move_result [Boolean] Whether to move return values.
+    # @param move_data [boolean] If true, communication for this method will
+    #     move instead of copy arguments and return values. Default is false.
+    #     This setting can be overridden by other `:move_*` settings.
+    # @param move_arguments [boolean] If true, arguments for this method are
+    #     moved instead of copied. If not set, uses the `:move_data` setting.
+    # @param move_results [boolean] If true, return values for this method are
+    #     moved instead of copied. If not set, uses the `:move_data` setting.
+    # @param move_block_arguments [boolean] If true, arguments to blocks passed
+    #     to this method are moved instead of copied. If not set, uses the
+    #     `:move_data` setting.
+    # @param move_block_results [boolean] If true, result values from blocks
+    #     passed to this method are moved instead of copied. If not set, uses
+    #     the `:move_data` setting.
+    # @param execute_blocks_in_place [boolean] If true, blocks passed to this
+    #     method are made shareable and passed into the wrapper to be executed
+    #     in the wrapped environment. If false (the default), blocks are
+    #     replaced by a proc that passes messages back out to the caller and
+    #     executes the block in the caller's environment.
     #
     def configure_method(method_name = nil,
-                         move: false,
+                         move_data: false,
                          move_arguments: nil,
-                         move_result: nil,
-                         execute_block_in_ractor: nil,
+                         move_results: nil,
                          move_block_arguments: nil,
-                         move_block_result: nil)
+                         move_block_results: nil,
+                         execute_blocks_in_place: nil)
       method_name = method_name.to_sym unless method_name.nil?
       @method_settings[method_name] =
-        MethodSettings.new(move: move,
+        MethodSettings.new(move_data: move_data,
                            move_arguments: move_arguments,
-                           move_result: move_result,
-                           execute_block_in_ractor: execute_block_in_ractor,
+                           move_results: move_results,
                            move_block_arguments: move_block_arguments,
-                           move_block_result: move_block_result)
+                           move_block_results: move_block_results,
+                           execute_blocks_in_place: execute_blocks_in_place)
     end
-
-    ##
-    # Return the wrapper stub. This is an object that responds to the same
-    # methods as the wrapped object, providing an easy way to call a wrapper.
-    #
-    # @return [Ractor::Wrapper::Stub]
-    #
-    attr_reader :stub
-
-    ##
-    # Return the number of threads used by the wrapper.
-    #
-    # @return [Integer]
-    #
-    attr_reader :thread_count
-
-    ##
-    # Return whether logging is enabled for this wrapper.
-    #
-    # @return [Boolean]
-    #
-    attr_reader :logging_enabled
 
     ##
     # Return the name of this wrapper.
@@ -381,6 +439,31 @@ class Ractor
     # @return [String]
     #
     attr_reader :name
+
+    ##
+    # Determine whether this wrapper runs in the current Ractor
+    #
+    # @return [boolean]
+    #
+    def use_current_ractor?
+      @ractor.nil?
+    end
+
+    ##
+    # Return whether logging is enabled for this wrapper.
+    #
+    # @return [Boolean]
+    #
+    def enable_logging?
+      @enable_logging
+    end
+
+    ##
+    # Return the number of threads used by the wrapper.
+    #
+    # @return [Integer]
+    #
+    attr_reader :threads
 
     ##
     # Return the method settings for the given method name. This returns the
@@ -397,6 +480,14 @@ class Ractor
     end
 
     ##
+    # Return the wrapper stub. This is an object that responds to the same
+    # methods as the wrapped object, providing an easy way to call a wrapper.
+    #
+    # @return [Ractor::Wrapper::Stub]
+    #
+    attr_reader :stub
+
+    ##
     # A lower-level interface for calling methods through the wrapper.
     #
     # @param method_name [Symbol] The name of the method to call
@@ -408,7 +499,7 @@ class Ractor
       reply_port = ::Ractor::Port.new
       transaction = ::Random.rand(7_958_661_109_946_400_884_391_936).to_s(36).freeze
       settings = method_settings(method_name)
-      block_arg = settings.execute_block_in_ractor? ? ::Ractor.shareable_proc(&) : :message
+      block_arg = make_block_arg(settings, &)
       message = CallMessage.new(method_name: method_name,
                                 args: args,
                                 kwargs: kwargs,
@@ -417,7 +508,7 @@ class Ractor
                                 settings: settings,
                                 reply_port: reply_port)
       maybe_log("Sending method", method_name: method_name, transaction: transaction)
-      @ractor.send(message, move: settings.move_arguments?)
+      @port.send(message, move: settings.move_arguments?)
       loop do
         reply_message = reply_port.receive
         case reply_message
@@ -444,7 +535,7 @@ class Ractor
     #
     def async_stop
       maybe_log("Stopping wrapper")
-      @ractor.send(StopMessage.new.freeze)
+      @port.send(StopMessage.new.freeze)
       self
     rescue ::Ractor::ClosedError
       # Ignore to allow stops to be idempotent.
@@ -457,7 +548,15 @@ class Ractor
     # @return [self]
     #
     def join
-      @ractor.join
+      if @ractor
+        @ractor.join
+      else
+        reply_port = ::Ractor::Port.new
+        @port.send(JoinMessage.new(reply_port))
+        reply_port.receive
+      end
+      self
+    rescue ::Ractor::ClosedError
       self
     end
 
@@ -466,11 +565,18 @@ class Ractor
     # only after a stop request has been issued using {#async_stop}, and may
     # block until the wrapper has fully stopped.
     #
-    # Only one ractor may call this method; any additional calls will fail.
+    # This can be called only if the wrapper was *not* configured with
+    # `use_current_ractor: true`. If the wrapper had that configuration, the
+    # object will not be moved, and does not need to be recovered. In such a
+    # case, any calls to this method will raise Ractor::Error.
+    #
+    # Only one ractor may call this method; any additional calls will fail with
+    # a Ractor::Error.
     #
     # @return [Object] The original wrapped object
     #
     def recover_object
+      raise ::Ractor::Error, "cannot recover an object from a local wrapper" unless @ractor
       @ractor.value
     end
 
@@ -480,7 +586,7 @@ class Ractor
     # @private
     # Message sent to initialize a server.
     #
-    InitMessage = ::Data.define(:object, :logging_enabled, :thread_count)
+    InitMessage = ::Data.define(:object, :enable_logging, :threads)
 
     ##
     # @private
@@ -503,6 +609,12 @@ class Ractor
 
     ##
     # @private
+    # Message sent to a server to request a join response
+    #
+    JoinMessage = ::Data.define(:reply_port)
+
+    ##
+    # @private
     # Message sent to report a return value
     #
     ReturnMessage = ::Data.define(:value)
@@ -521,12 +633,50 @@ class Ractor
 
     private
 
+    def setup_local_server(object)
+      maybe_log("Starting local server")
+      @ractor = nil
+      @port = ::Ractor::Port.new
+      ::Thread.new do
+        Server.run_local(object: object,
+                         port: @port,
+                         name: name,
+                         enable_logging: enable_logging?,
+                         threads: threads)
+      end
+    end
+
+    def setup_isolated_server(object)
+      maybe_log("Starting isolated server")
+      @ractor = ::Ractor.new(name, enable_logging?, threads, name: "wrapper:#{name}") do |name, enable_logging, threads|
+        Server.run_isolated(name: name,
+                            enable_logging: enable_logging,
+                            threads: threads)
+      end
+      @port = @ractor.default_port
+      @port.send(object, move: true)
+    end
+
+    def make_transaction
+      ::Random.rand(7_958_661_109_946_400_884_391_936).to_s(36).freeze
+    end
+
+    def make_block_arg(settings, &)
+      if !block_given?
+        nil
+      elsif settings.execute_blocks_in_place?
+        ::Ractor.shareable_proc(&)
+      else
+        :send_block_message
+      end
+    end
+
     def handle_yield(message, transaction, settings, method_name)
       maybe_log("Yielding to block", method_name: method_name, transaction: transaction)
       begin
         block_result = yield(*message.args, **message.kwargs)
         maybe_log("Sending block result", method_name: method_name, transaction: transaction)
-        message.reply_port.send(ReturnMessage.new(block_result), move: settings.move_block_result?)
+        message.reply_port.send(ReturnMessage.new(block_result), move: settings.move_block_results?)
       rescue ::Exception => e # rubocop:disable Lint/RescueException
         maybe_log("Sending block exception", method_name: method_name, transaction: transaction)
         begin
@@ -542,7 +692,7 @@ class Ractor
     end
 
     def maybe_log(str, transaction: nil, method_name: nil)
-      return unless logging_enabled
+      return unless enable_logging?
       metadata = [::Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.%L"), "Ractor::Wrapper/#{name}"]
       metadata << "Transaction/#{transaction}" if transaction
       metadata << "Method/#{method_name}" if method_name
@@ -558,13 +708,39 @@ class Ractor
     # runs worker threads internally to handle actual method calls.
     #
     # See the {#run} method for an overview of the Server implementation and
-    # lifecycle. Server is stateful and not shareable.
+    # lifecycle.
     #
     # @private
     #
     class Server
-      def initialize(name)
+      ##
+      # @private
+      # Create and run a server in the current Ractor
+      #
+      def self.run_local(object:, port:, name:, enable_logging: false, threads: 1)
+        server = new(isolated: false, object:, port:, name:, enable_logging:, threads:)
+        server.run
+      end
+
+      ##
+      # @private
+      # Create and run a server in an isolated Ractor
+      #
+      def self.run_isolated(name:, enable_logging: false, threads: 1)
+        port = ::Ractor.current.default_port
+        server = new(isolated: true, object: nil, port:, name:, enable_logging:, threads:)
+        server.run
+      end
+
+      def initialize(isolated:, object:, port:, name:, enable_logging:, threads:)
+        @isolated = isolated
+        @object = object
+        @port = port
         @name = name
+        @enable_logging = enable_logging
+        @threads = threads
+        @queue = ::Queue.new
+        @join_requests = []
       end
 
       ##
@@ -578,7 +754,8 @@ class Ractor
       # The server returns the wrapped object, so one client can recover it.
       #
       def run
-        init_phase
+        receive_remote_object if @isolated
+        start_threads
         running_phase
         stopping_phase
         cleanup_phase
@@ -590,24 +767,14 @@ class Ractor
 
       private
 
-      ##
-      # In the **init phase**, the Server:
-      #
-      # *   Receives an initial message providing the object to wrap, and
-      #     server configuration such as thread count and communications
-      #     settings.
-      # *   Initializes the job queue.
-      # *   Spawns worker threads.
-      #
-      def init_phase
-        maybe_log("Waiting for initialization")
-        init_message = ::Ractor.receive
-        @object = init_message.object
-        @logging_enabled = init_message.logging_enabled
-        @thread_count = init_message.thread_count
-        @queue = ::Queue.new
-        maybe_log("Spawning #{@thread_count} worker threads")
-        (1..@thread_count).map do |worker_num|
+      def receive_remote_object
+        maybe_log("Waiting for remote object")
+        @object = @port.receive
+      end
+
+      def start_threads
+        maybe_log("Spawning #{@threads} worker threads")
+        (1..@threads).map do |worker_num|
           ::Thread.new { worker_thread(worker_num) }
         end
       end
@@ -627,19 +794,22 @@ class Ractor
       #
       def running_phase
         loop do
-          maybe_log("Waiting for message")
-          message = ::Ractor.receive
+          maybe_log("Waiting for message in running phase")
+          message = @port.receive
           case message
           when CallMessage
             maybe_log("Received CallMessage", call_message: message)
             @queue.enq(message)
           when WorkerStoppedMessage
             maybe_log("Received unexpected WorkerStoppedMessage")
-            @thread_count -= 1
+            @threads -= 1
             break
           when StopMessage
             maybe_log("Received stop")
             break
+          when JoinMessage
+            maybe_log("Received and queueing join request")
+            @join_requests << message.reply_port
           end
         end
       end
@@ -654,21 +824,20 @@ class Ractor
       #
       def stopping_phase
         @queue.close
-        while @thread_count.positive?
-          maybe_log("Refusing incoming messages while stopping")
-          message = ::Ractor.receive
+        while @threads.positive?
+          maybe_log("Waiting for message in stopping phase")
+          message = @port.receive
           case message
           when CallMessage
-            begin
-              refuse_method(message)
-            rescue ::Ractor::ClosedError
-              maybe_log("Reply port is closed", call_message: message)
-            end
+            refuse_method(message)
           when WorkerStoppedMessage
             maybe_log("Acknowledged WorkerStoppedMessage: #{message.worker_num}")
-            @thread_count -= 1
+            @threads -= 1
           when StopMessage
             maybe_log("Stop received when already stopping")
+          when JoinMessage
+            maybe_log("Received and queueing join request")
+            @join_requests << message.reply_port
           end
         end
       end
@@ -679,25 +848,31 @@ class Ractor
       # requests with a refusal.
       #
       def cleanup_phase
-        ::Ractor.current.close
-        maybe_log("Checking message queue for cleanup")
+        maybe_log("Closing inbox")
+        @port.close
+        maybe_log("Responding to join requests")
+        @join_requests.each { |port| send_join_reply(port) }
+        maybe_log("Draining inbox")
         loop do
-          message = ::Ractor.receive
+          message = begin
+            @port.receive
+          rescue ::Ractor::ClosedError
+            maybe_log("Inbox is empty")
+            nil
+          end
+          return if message.nil?
           case message
           when CallMessage
-            begin
-              refuse_method(message)
-            rescue ::Ractor::ClosedError
-              maybe_log("Reply port is closed", call_message: message)
-            end
+            refuse_method(message)
           when WorkerStoppedMessage
             maybe_log("Unexpected WorkerStoppedMessage when in cleanup")
           when StopMessage
             maybe_log("Stop received when already stopping")
+          when JoinMessage
+            maybe_log("Received and responding immediately to join request")
+            send_join_reply(message.reply_port)
           end
         end
-      rescue ::Ractor::ClosedError
-        maybe_log("Message queue is empty")
       end
 
       ##
@@ -719,7 +894,7 @@ class Ractor
       ensure
         maybe_log("Worker stopping", worker_num: worker_num)
         begin
-          ::Ractor.current.send(WorkerStoppedMessage.new(worker_num))
+          @port.send(WorkerStoppedMessage.new(worker_num))
         rescue ::Ractor::ClosedError
           maybe_log("Orphaned worker thread", worker_num: worker_num)
         end
@@ -734,13 +909,12 @@ class Ractor
       # will catch the exception and try to send a simpler response.
       #
       def handle_method(message, worker_num: nil)
-        block = message.block_arg
-        block = make_proxy_block(message.reply_port, message.settings) if block == :message
+        block = make_block(message)
         maybe_log("Running method", worker_num: worker_num, call_message: message)
         begin
           result = @object.send(message.method_name, *message.args, **message.kwargs, &block)
           maybe_log("Sending return value", worker_num: worker_num, call_message: message)
-          message.reply_port.send(ReturnMessage.new(result), move: message.settings.move_result?)
+          message.reply_port.send(ReturnMessage.new(result), move: message.settings.move_results?)
         rescue ::Exception => e # rubocop:disable Lint/RescueException
           maybe_log("Sending exception", worker_num: worker_num, call_message: message)
           begin
@@ -755,11 +929,12 @@ class Ractor
         end
       end
 
-      def make_proxy_block(port, settings)
+      def make_block(message)
+        return message.block_arg unless message.block_arg == :send_block_message
         proc do |*args, **kwargs|
           reply_port = ::Ractor::Port.new
           yield_message = YieldMessage.new(args: args, kwargs: kwargs, reply_port: reply_port)
-          port.send(yield_message, move: settings.move_block_arguments?)
+          message.reply_port.send(yield_message, move: message.settings.move_block_arguments?)
           reply_message = reply_port.receive
           case reply_message
           when ExceptionMessage
@@ -780,13 +955,19 @@ class Ractor
         begin
           error = ::Ractor::ClosedError.new("Wrapper is shutting down")
           message.reply_port.send(ExceptionMessage.new(error))
-        rescue ::StandardError
+        rescue ::Ractor::Error
           maybe_log("Failure to send refusal message", call_message: message)
         end
       end
 
+      def send_join_reply(port)
+        port.send(nil)
+      rescue ::Ractor::ClosedError
+        maybe_log("Join reply port is closed")
+      end
+
       def maybe_log(str, call_message: nil, worker_num: nil, transaction: nil, method_name: nil)
-        return unless @logging_enabled
+        return unless @enable_logging
         transaction ||= call_message&.transaction
         method_name ||= call_message&.method_name
         metadata = [::Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.%L"), "Ractor::Wrapper/#{@name}"]

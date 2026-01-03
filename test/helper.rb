@@ -18,6 +18,10 @@ class RemoteObject
     yield(*, **)
   end
 
+  def run_block_with_id(obj)
+    yield(obj, obj.object_id)
+  end
+
   def whoops
     raise "Whoops"
   end
