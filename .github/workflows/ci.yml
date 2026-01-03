@@ -16,32 +16,28 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            ruby: "3.0"
-            tool: test
+            ruby: "4.0"
+            tool: "--test"
           - os: macos-latest
-            ruby: "3.0"
-            tool: test
-          - os: windows-latest
-            ruby: "3.0"
-            tool: test
+            ruby: "4.0"
+            tool: "--test"
           - os: ubuntu-latest
-            ruby: "3.0"
-            tool: rubocop
-          - os: ubuntu-latest
-            ruby: "3.0"
-            tool: "build , yardoc"
+            ruby: "4.0"
+            tool: "--rubocop --build --yard"
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
       - name: Install Ruby ${{ matrix.ruby }}
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
-      - name: Checkout repo
-        uses: actions/checkout@v2
-      - name: Install dependencies
+          bundler: default
+          bundler-cache: true
+      - name: Install toys
         shell: bash
-        run: "bundle install && gem install --no-document toys"
-      - name: Run ${{ matrix.tool || 'test' }}
+        run: "gem install --no-document toys"
+      - name: Run ${{ matrix.tool }}
         shell: bash
-        run: toys do ${{ matrix.tool || 'test' }} < /dev/null
+        run: toys ci --only ${{ matrix.tool }} < /dev/null

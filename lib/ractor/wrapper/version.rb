@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 class Ractor
   class Wrapper
     ##
@@ -5,6 +7,6 @@ class Ractor
     #
     # @return [String]
     #
-    VERSION = "0.2.0".freeze
+    VERSION = "0.2.0"
   end
 end

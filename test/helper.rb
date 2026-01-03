@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "minitest/autorun"
 require "minitest/focus"
 require "minitest/rg"
@@ -8,7 +10,15 @@ class RemoteObject
     "#{args}, #{kwargs}"
   end
 
-  def fail
+  def object_and_id(arg)
+    [arg, arg.object_id]
+  end
+
+  def run_block(*, **)
+    yield(*, **)
+  end
+
+  def whoops
     raise "Whoops"
   end
 
