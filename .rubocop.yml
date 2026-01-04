@@ -237,6 +237,9 @@ Style/FileTouch:
   Enabled: true
 Style/FileWrite:
   Enabled: true
+Style/GlobalVars:
+  Exclude:
+    - "test/**/*"
 Style/GuardClause:
   Enabled: false
 Style/HashConversion:

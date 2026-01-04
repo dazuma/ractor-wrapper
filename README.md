@@ -1,8 +1,7 @@
 # Ractor::Wrapper
 
-`Ractor::Wrapper` is an experimental class that wraps a non-shareable object,
-allowing multiple Ractors to access it concurrently. This can make it possible
-for Ractors to share a "plain" object such as a database connection.
+Ractor::Wrapper is an experimental class that wraps a non-shareable object in
+an actor, allowing multiple Ractors to access it concurrently.
 
 **WARNING:** This is a highly experimental library, and currently _not_
 recommended for production use. (As of Ruby 4.0.0, the same can be said of
@@ -20,73 +19,67 @@ Require it in your code:
 
 You can then create wrappers for objects. See the example below.
 
-`Ractor::Wrapper` requires Ruby 4.0.0 or later.
+Ractor::Wrapper requires Ruby 4.0.0 or later.
 
-## About Ractor::Wrapper
+## What is Ractor::Wrapper?
 
-Ractors for the most part cannot access objects concurrently with other Ractors
-unless the object is _shareable_, which generally means deeply immutable along
-with a few other restrictions. If multiple Ractors need to interact with a
-shared resource that is stateful or otherwise not shareable that resource must
-itself be implemented and accessed as a Ractor.
+For the most part, unless an object is _sharable_, which generally means
+deeply immutable along with a few other restrictions, it cannot be accessed
+directly from another Ractor. This makes it difficult for multiple Ractors
+to share a resource that is stateful. Such a resource must typically itself
+be implemented as a Ractor and accessed via message passing.
 
-`Ractor::Wrapper` makes it possible for such a shared resource to be
-implemented as an object and accessed using ordinary method calls. It does this
-by "wrapping" the object in a Ractor, and mapping method calls to message
-passing. This may make it easier to implement such a resource with a simple
-class rather than a full-blown Ractor with message passing, and it may also be
-useful for adapting existing object-based resources.
+Ractor::Wrapper makes it possible for an ordinary non-shareable object to
+be accessed from multiple Ractors. It does this by "wrapping" the object
+with an actor that listens for messages and invokes the object's methods in
+a controlled single-Ractor environment. It then provides a stub object that
+reproduces the interface of the original object, but responds to method
+calls by sending messages to the wrapper. Ractor::Wrapper can be used to
+implement simple actors by writing "plain" Ruby objects, or to adapt
+existing non-shareable objects to a multi-Ractor world.
 
-Given a shared resource object, `Ractor::Wrapper` starts a new Ractor and
-"runs" the object within that Ractor. It provides you with a stub object on
-which you can invoke methods. The wrapper responds to these method calls by
-sending messages to the internal Ractor, which invokes the shared object and
-then sends back the result. If the underlying object is thread-safe, you can
-configure the wrapper to run multiple threads that can run methods
-concurrently. Or, if not, the wrapper can serialize requests to the object.
+### Net::HTTP example
 
-### Example usage
-
-The following example shows how to share a single `Faraday::Conection`
-object among multiple Ractors. Because `Faraday::Connection` is not itself
-thread-safe, this example serializes all calls to it.
+The following example shows how to share a single Net::HTTP session object
+among multiple Ractors.
 
 ```ruby
 require "ractor/wrapper"
-require "faraday"
+require "net/http"
 
-# Create a Faraday connection. Faraday connections are not shareable,
+# Create a Net::HTTP session. Net::HTTP sessions are not shareable,
 # so normally only one Ractor can access them at a time.
-connection = Faraday.new("http://example.com")
+http = Net::HTTP.new("example.com")
+http.start
 
-# Create a wrapper around the connection. This starts up an internal
-# Ractor and "moves" the connection object to that Ractor.
-wrapper = Ractor::Wrapper.new(connection)
+# Create a wrapper around the session. This moves the session into an
+# internal Ractor and listens for method call requests. By default, a
+# wrapper serializes calls, handling one at a time, for compatibility
+# with non-thread-safe objects.
+wrapper = Ractor::Wrapper.new(http)
 
-# At this point, the connection object can no longer be accessed
-# directly because it is now owned by the wrapper's internal Ractor.
-#     connection.get("/whoops")  # <= raises an error
+# At this point, the session object can no longer be accessed directly
+# because it is now owned by the wrapper's internal Ractor.
+#     http.get("/whoops")  # <= raises Ractor::MovedError
 
-# However, you can access the connection via the stub object provided
-# by the wrapper. This stub proxies the call to the wrapper's internal
+# However, you can access the session via the stub object provided by
+# the wrapper. This stub proxies the call to the wrapper's internal
 # Ractor. And it's shareable, so any number of Ractors can use it.
-wrapper.stub.get("/hello")
+response = wrapper.stub.get("/")
 
 # Here, we start two Ractors, and pass the stub to each one. Each
 # Ractor can simply call methods on the stub as if it were the original
-# connection object. (Internally, of course, the calls are proxied back
-# to the wrapper.) By default, all calls are serialized. However, if
-# you know that the underlying object is thread-safe, you can configure
-# a wrapper to run calls concurrently.
-r1 = Ractor.new(wrapper.stub) do |conn|
-  10.times do
-    conn.get("/hello")
+# connection object. Internally, of course, the calls are proxied to
+# the original object via the wrapper, and execution is serialized.
+r1 = Ractor.new(wrapper.stub) do |stub|
+  5.times do
+    stub.get("/hello")
   end
   :ok
 end
-r2 = Ractor.new(wrapper.stub) do |conn|
-  10.times do
-    conn.get("/ruby")
+r2 = Ractor.new(wrapper.stub) do |stub|
+  5.times do
+    stub.get("/ruby")
   end
   :ok
 end
@@ -95,17 +88,77 @@ end
 r1.join
 r2.join
 
-# After you stop the wrapper, you can retrieve the underlying
-# connection object and access it directly again.
+# After you stop the wrapper, you can retrieve the underlying session
+# object and access it directly again.
 wrapper.async_stop
-connection = wrapper.recover_object
-connection.get("/finally")
+http = wrapper.recover_object
+http.finish
+```
+
+### SQLite3 example
+
+The following example shows how to share a SQLite3 database among multiple
+Ractors.
+
+```ruby
+require "ractor/wrapper"
+require "sqlite3"
+
+# Create a SQLite3 database. These objects are not shareable, so
+# normally only one Ractor can access them.
+db = SQLite3::Database.new($my_database_path)
+
+# Create a wrapper around the database. A SQLite3::Database object
+# cannot be moved between Ractors, so we configure the wrapper to run
+# in the current Ractor. You can also configure it to run multiple
+# worker threads because the database object itself is thread-safe.
+wrapper = Ractor::Wrapper.new(db, use_current_ractor: true, threads: 2)
+
+# At this point, the database object can still be accessed directly
+# because it hasn't been moved to a different Ractor.
+rows = db.execute("select * from numbers")
+
+# You can also access the database via the stub object provided by the
+# wrapper.
+rows = wrapper.stub.execute("select * from numbers")
+
+# Here, we start two Ractors, and pass the stub to each one. The
+# wrapper's two worker threads will handle the requests in the order
+# received.
+r1 = Ractor.new(wrapper.stub) do |stub|
+  5.times do
+    stub.execute("select * from numbers")
+  end
+  :ok
+end
+r2 = Ractor.new(wrapper.stub) do |stub|
+  5.times do
+    stub.execute("select * from numbers")
+  end
+  :ok
+end
+
+# Wait for the two above Ractors to finish.
+r1.join
+r2.join
+
+# After stopping the wrapper, you can call the join method to wait for
+# it to completely finish.
+wrapper.async_stop
+wrapper.join
+
+# When running a wrapper with :use_current_ractor, you do not need to
+# recover the object, because it was never moved. The recover_object
+# method is not available.
+#     db2 = wrapper.recover_object  # <= raises Ractor::Error
 ```
 
 ### Features
 
-*   Provides a method interface to an object running in its own Ractor.
+*   Provides a Ractor-shareable method interface to a non-shareable object.
 *   Supports arbitrary method arguments and return values.
+*   Can be configured to run in its own isolated Ractor or in a Thread in
+    the current Ractor.
 *   Can be configured per method whether to copy or move arguments and
     return values.
 *   Blocks can be run in the calling Ractor or in the object Ractor.
@@ -125,8 +178,8 @@ Ruby 4.0.0.
 *   Certain types cannot be used as method arguments or return values
     because Ractor does not allow them to be moved between Ractors. These
     include threads, backtraces, and a few others.
-*   Any exceptions raised are always copied back to the calling Ractor, and
-    the backtrace is cleared out. This is due to
+*   Any exceptions raised are always copied (rather than moved) back to the
+    calling Ractor, and the backtrace is cleared out. This is due to
     https://bugs.ruby-lang.org/issues/21818
 
 ## Contributing
@@ -142,7 +195,7 @@ Development is done in GitHub at https://github.com/dazuma/ractor-wrapper.
 
 The library uses [toys](https://dazuma.github.io/toys) for testing and CI. To
 run the test suite, `gem install toys` and then run `toys ci`. You can also run
-unit tests, rubocop, and builds independently.
+unit tests, rubocop, and build tests independently.
 
 ## License
 

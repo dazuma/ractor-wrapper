@@ -3,35 +3,22 @@
 require "helper"
 
 describe ::Ractor::Wrapper do
-  it "runs the README example" do
-    # Faraday cannot be run outside the main Ractor
-    skip
-    readme_content = ::File.read(::File.join(::File.dirname(__dir__), "README.md"))
-    script = /\n```ruby\n(.*\n)```\n/m.match(readme_content)[1]
-    eval(script) # rubocop:disable Security/Eval
+  let(:ruby_block_finder) { /\n```ruby\n((?:(?:[^`][^\n]*)?\n)+)```\n/m }
 
-    require "net/http"
-    connection = Faraday.new("http://example.com")
-    wrapper = Ractor::Wrapper.new(connection)
-    begin
-      wrapper.stub.get("/hello")
-    ensure
-      wrapper.async_stop
-    end
+  it "runs the Net::HTTP README example" do
+    readme_content = ::File.read(::File.join(::File.dirname(__dir__), "README.md"))
+    script = readme_content.scan(ruby_block_finder)[0][0]
+    script = "#{script}\nresponse\n"
+    response = eval(script) # rubocop:disable Security/Eval
+    assert_kind_of(Net::HTTPOK, response)
   end
 
-  it "wraps a SQLite3 database" do
-    # SQLite3::Database is not movable
-    skip
-    require "sqlite3"
-    path = File.join(__dir__, "data", "numbers.db")
-    db = SQLite3::Database.new(path)
-    wrapper = Ractor::Wrapper.new(db)
-    begin
-      rows = wrapper.stub.execute("select * from numbers")
-      assert_equal([["one", 1], ["two", 2]], rows)
-    ensure
-      wrapper.async_stop
-    end
+  it "runs the SQLite3 README example" do
+    $my_database_path = File.join(__dir__, "data", "numbers.db")
+    readme_content = ::File.read(::File.join(::File.dirname(__dir__), "README.md"))
+    script = readme_content.scan(ruby_block_finder)[1][0]
+    script = "#{script}\nrows\n"
+    rows = eval(script) # rubocop:disable Security/Eval
+    assert_equal([["one", 1], ["two", 2]], rows)
   end
 end
