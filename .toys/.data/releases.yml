@@ -1,0 +1,8 @@
+repo: dazuma/ractor-wrapper
+git_user_name: Daniel Azuma
+git_user_email: dazuma@gmail.com
+
+gems:
+  - name: ractor-wrapper
+    directory: .
+    gh_pages_directory: gem
