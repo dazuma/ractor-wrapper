@@ -169,18 +169,20 @@ wrapper.join
 
 ### Caveats
 
-Ractor::Wrapper is subject to some limitations (and bugs) of Ractors, as of
-Ruby 4.0.0.
-
-*   You can run blocks in the object's Ractor only if the block does not
-    access any data outside the block. Otherwise, the block must be run in
-    the calling Ractor.
 *   Certain types cannot be used as method arguments or return values
-    because Ractor does not allow them to be moved between Ractors. These
-    include threads, backtraces, and a few others.
-*   Any exceptions raised are always copied (rather than moved) back to the
-    calling Ractor, and the backtrace is cleared out. This is due to
-    https://bugs.ruby-lang.org/issues/21818
+    because they cannot be moved between Ractors. As of Ruby 4.0.0, these
+    include threads, backtraces, procs, and a few others.
+*   As of Ruby 4.0.0, any exceptions raised are always copied (rather than
+    moved) back to the calling Ractor, and the backtrace is cleared out.
+    This is due to https://bugs.ruby-lang.org/issues/21818
+*   Blocks can be run "in place" (i.e. in the wrapped object context) only
+    if the block does not access any data outside the block. Otherwise, the
+    block must be run in caller's context.
+*   Blocks configured to run in the caller's context can only be run while
+    a method is executing. They cannot be "saved" as a proc to be run
+    later unless they are configured to run "in place". In particular,
+    using blocks as a syntax to define callbacks can generally not be done
+    through a wrapper.
 
 ## Contributing
 
