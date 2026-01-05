@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>
+  File: README
+  
+    &mdash; Ractor::Wrapper
+  
+</title>
+
+  <link rel="stylesheet" href="css/style.css" type="text/css" />
+
+  <link rel="stylesheet" href="css/common.css" type="text/css" />
+
+<script type="text/javascript">
+  pathId = "README";
+  relpath = '';
+</script>
+
+
+  <script type="text/javascript" charset="utf-8" src="js/jquery.js"></script>
+
+  <script type="text/javascript" charset="utf-8" src="js/app.js"></script>
+
+
+  </head>
+  <body>
+    <div class="nav_wrap">
+      <iframe id="nav" src="file_list.html?1"></iframe>
+      <div id="resizer"></div>
+    </div>
+
+    <div id="main" tabindex="-1">
+      <div id="header">
+        <div id="menu">
+  
+    <a href="_index.html">Index</a> &raquo; 
+    <span class="title">File: README</span>
+  
+</div>
+
+        <div id="search">
+  
+    <a class="full_list_link" id="class_list_link"
+        href="class_list.html">
+
+        <svg width="24" height="24">
+          <rect x="0" y="4" width="24" height="4" rx="1" ry="1"></rect>
+          <rect x="0" y="12" width="24" height="4" rx="1" ry="1"></rect>
+          <rect x="0" y="20" width="24" height="4" rx="1" ry="1"></rect>
+        </svg>
+    </a>
+  
+</div>
+        <div class="clear"></div>
+      </div>
+
+      <div id="content"><div id='filecontents'><h1 id="ractor-wrapper">Ractor::Wrapper</h1>
+
+<p>Ractor::Wrapper is an experimental class that wraps a non-shareable object in
+an actor, allowing multiple Ractors to access it concurrently.</p>
+
+<p><strong>WARNING:</strong> This is a highly experimental library, and currently <em>not</em>
+recommended for production use. (As of Ruby 4.0.0, the same can be said of
+Ractors in general.)</p>
+
+<h2 id="quick-start">Quick start</h2>
+
+<p>Install ractor-wrapper as a gem, or include it in your bundle.</p>
+
+<pre class="code ruby"><code class="ruby"><span class='id identifier rubyid_gem'>gem</span> <span class='id identifier rubyid_install'>install</span> <span class='id identifier rubyid_ractor'>ractor</span><span class='op'>-</span><span class='id identifier rubyid_wrapper'>wrapper</span>
+</code></pre>
+
+<p>Require it in your code:</p>
+
+<pre class="code ruby"><code class="ruby"><span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>ractor/wrapper</span><span class='tstring_end'>&quot;</span></span>
+</code></pre>
+
+<p>You can then create wrappers for objects. See the example below.</p>
+
+<p>Ractor::Wrapper requires Ruby 4.0.0 or later.</p>
+
+<h2 id="what-is-ractor-wrapper">What is Ractor::Wrapper?</h2>
+
+<p>For the most part, unless an object is <em>sharable</em>, which generally means
+deeply immutable along with a few other restrictions, it cannot be accessed
+directly from another Ractor. This makes it difficult for multiple Ractors
+to share a resource that is stateful. Such a resource must typically itself
+be implemented as a Ractor and accessed via message passing.</p>
+
+<p>Ractor::Wrapper makes it possible for an ordinary non-shareable object to
+be accessed from multiple Ractors. It does this by &quot;wrapping&quot; the object
+with an actor that listens for messages and invokes the object&#39;s methods in
+a controlled single-Ractor environment. It then provides a stub object that
+reproduces the interface of the original object, but responds to method
+calls by sending messages to the wrapper. Ractor::Wrapper can be used to
+implement simple actors by writing &quot;plain&quot; Ruby objects, or to adapt
+existing non-shareable objects to a multi-Ractor world.</p>
+
+<h3 id="net-http-example">Net::HTTP example</h3>
+
+<p>The following example shows how to share a single Net::HTTP session object
+among multiple Ractors.</p>
+
+<pre class="code ruby"><code class="ruby"><span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>ractor/wrapper</span><span class='tstring_end'>&quot;</span></span>
+<span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>net/http</span><span class='tstring_end'>&quot;</span></span>
+
+<span class='comment'># Create a Net::HTTP session. Net::HTTP sessions are not shareable,
+</span><span class='comment'># so normally only one Ractor can access them at a time.
+</span><span class='id identifier rubyid_http'>http</span> <span class='op'>=</span> <span class='const'>Net</span><span class='op'>::</span><span class='const'>HTTP</span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>example.com</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+<span class='id identifier rubyid_http'>http</span><span class='period'>.</span><span class='id identifier rubyid_start'>start</span>
+
+<span class='comment'># Create a wrapper around the session. This moves the session into an
+</span><span class='comment'># internal Ractor and listens for method call requests. By default, a
+</span><span class='comment'># wrapper serializes calls, handling one at a time, for compatibility
+</span><span class='comment'># with non-thread-safe objects.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'><span class='object_link'><a href="Ractor/Wrapper.html" title="Ractor::Wrapper (class)">Wrapper</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="Ractor/Wrapper.html#initialize-instance_method" title="Ractor::Wrapper#initialize (method)">new</a></span></span><span class='lparen'>(</span><span class='id identifier rubyid_http'>http</span><span class='rparen'>)</span>
+
+<span class='comment'># At this point, the session object can no longer be accessed directly
+</span><span class='comment'># because it is now owned by the wrapper&#39;s internal Ractor.
+</span><span class='comment'>#     http.get(&quot;/whoops&quot;)  # &lt;= raises Ractor::MovedError
+</span>
+<span class='comment'># However, you can access the session via the stub object provided by
+</span><span class='comment'># the wrapper. This stub proxies the call to the wrapper&#39;s internal
+</span><span class='comment'># Ractor. And it&#39;s shareable, so any number of Ractors can use it.
+</span><span class='id identifier rubyid_response'>response</span> <span class='op'>=</span> <span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_get'>get</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>/</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+
+<span class='comment'># Here, we start two Ractors, and pass the stub to each one. Each
+</span><span class='comment'># Ractor can simply call methods on the stub as if it were the original
+</span><span class='comment'># connection object. Internally, of course, the calls are proxied to
+</span><span class='comment'># the original object via the wrapper, and execution is serialized.
+</span><span class='id identifier rubyid_r1'>r1</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_stub'>stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_get'>get</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>/hello</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+<span class='id identifier rubyid_r2'>r2</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_stub'>stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_get'>get</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>/ruby</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+
+<span class='comment'># Wait for the two above Ractors to finish.
+</span><span class='id identifier rubyid_r1'>r1</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+<span class='id identifier rubyid_r2'>r2</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+
+<span class='comment'># After you stop the wrapper, you can retrieve the underlying session
+</span><span class='comment'># object and access it directly again.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_async_stop'>async_stop</span>
+<span class='id identifier rubyid_http'>http</span> <span class='op'>=</span> <span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_recover_object'>recover_object</span>
+<span class='id identifier rubyid_http'>http</span><span class='period'>.</span><span class='id identifier rubyid_finish'>finish</span>
+</code></pre>
+
+<h3 id="sqlite3-example">SQLite3 example</h3>
+
+<p>The following example shows how to share a SQLite3 database among multiple
+Ractors.</p>
+
+<pre class="code ruby"><code class="ruby"><span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>ractor/wrapper</span><span class='tstring_end'>&quot;</span></span>
+<span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>sqlite3</span><span class='tstring_end'>&quot;</span></span>
+
+<span class='comment'># Create a SQLite3 database. These objects are not shareable, so
+</span><span class='comment'># normally only one Ractor can access them.
+</span><span class='id identifier rubyid_db'>db</span> <span class='op'>=</span> <span class='const'>SQLite3</span><span class='op'>::</span><span class='const'>Database</span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='gvar'>$my_database_path</span><span class='rparen'>)</span>
+
+<span class='comment'># Create a wrapper around the database. A SQLite3::Database object
+</span><span class='comment'># cannot be moved between Ractors, so we configure the wrapper to run
+</span><span class='comment'># in the current Ractor. You can also configure it to run multiple
+</span><span class='comment'># worker threads because the database object itself is thread-safe.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'><span class='object_link'><a href="Ractor/Wrapper.html" title="Ractor::Wrapper (class)">Wrapper</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="Ractor/Wrapper.html#initialize-instance_method" title="Ractor::Wrapper#initialize (method)">new</a></span></span><span class='lparen'>(</span><span class='id identifier rubyid_db'>db</span><span class='comma'>,</span> <span class='label'>use_current_ractor:</span> <span class='kw'>true</span><span class='comma'>,</span> <span class='label'>threads:</span> <span class='int'>2</span><span class='rparen'>)</span>
+
+<span class='comment'># At this point, the database object can still be accessed directly
+</span><span class='comment'># because it hasn&#39;t been moved to a different Ractor.
+</span><span class='id identifier rubyid_rows'>rows</span> <span class='op'>=</span> <span class='id identifier rubyid_db'>db</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+
+<span class='comment'># You can also access the database via the stub object provided by the
+</span><span class='comment'># wrapper.
+</span><span class='id identifier rubyid_rows'>rows</span> <span class='op'>=</span> <span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+
+<span class='comment'># Here, we start two Ractors, and pass the stub to each one. The
+</span><span class='comment'># wrapper&#39;s two worker threads will handle the requests in the order
+</span><span class='comment'># received.
+</span><span class='id identifier rubyid_r1'>r1</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_stub'>stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+<span class='id identifier rubyid_r2'>r2</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_stub'>stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+
+<span class='comment'># Wait for the two above Ractors to finish.
+</span><span class='id identifier rubyid_r1'>r1</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+<span class='id identifier rubyid_r2'>r2</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+
+<span class='comment'># After stopping the wrapper, you can call the join method to wait for
+</span><span class='comment'># it to completely finish.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_async_stop'>async_stop</span>
+<span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+
+<span class='comment'># When running a wrapper with :use_current_ractor, you do not need to
+</span><span class='comment'># recover the object, because it was never moved. The recover_object
+</span><span class='comment'># method is not available.
+</span><span class='comment'>#     db2 = wrapper.recover_object  # &lt;= raises Ractor::Error
+</span></code></pre>
+
+<h3 id="features">Features</h3>
+
+<ul>
+<li>  Provides a Ractor-shareable method interface to a non-shareable object.</li>
+<li>  Supports arbitrary method arguments and return values.</li>
+<li>  Can be configured to run in its own isolated Ractor or in a Thread in
+the current Ractor.</li>
+<li>  Can be configured per method whether to copy or move arguments and
+return values.</li>
+<li>  Blocks can be run in the calling Ractor or in the object Ractor.</li>
+<li>  Raises exceptions thrown by the method.</li>
+<li>  Can serialize method calls for non-thread-safe objects, or run methods
+concurrently in multiple worker threads for thread-safe objects.</li>
+<li>  Can gracefully shut down the wrapper and retrieve the original object.</li>
+</ul>
+
+<h3 id="caveats">Caveats</h3>
+
+<ul>
+<li>  Certain types cannot be used as method arguments or return values
+because they cannot be moved between Ractors. As of Ruby 4.0.0, these
+include threads, backtraces, procs, and a few others.</li>
+<li>  As of Ruby 4.0.0, any exceptions raised are always copied (rather than
+moved) back to the calling Ractor, and the backtrace is cleared out.
+This is due to <a href="https://bugs.ruby-lang.org/issues/21818">https://bugs.ruby-lang.org/issues/21818</a></li>
+<li>  Blocks can be run &quot;in place&quot; (i.e. in the wrapped object context) only
+if the block does not access any data outside the block. Otherwise, the
+block must be run in caller&#39;s context.</li>
+<li>  Blocks configured to run in the caller&#39;s context can only be run while
+a method is executing. They cannot be &quot;saved&quot; as a proc to be run
+later unless they are configured to run &quot;in place&quot;. In particular,
+using blocks as a syntax to define callbacks can generally not be done
+through a wrapper.</li>
+</ul>
+
+<h2 id="contributing">Contributing</h2>
+
+<p>Development is done in GitHub at <a href="https://github.com/dazuma/ractor-wrapper">https://github.com/dazuma/ractor-wrapper</a>.</p>
+
+<ul>
+<li>  To file issues: <a href="https://github.com/dazuma/ractor-wrapper/issues">https://github.com/dazuma/ractor-wrapper/issues</a>.</li>
+<li>  For questions and discussion, please do not file an issue. Instead, use the
+discussions feature: <a href="https://github.com/dazuma/ractor-wrapper/discussions">https://github.com/dazuma/ractor-wrapper/discussions</a>.</li>
+<li>  Pull requests are welcome, but the library is highly experimental at this
+stage, and I recommend discussing features or design changes first before
+implementing.</li>
+</ul>
+
+<p>The library uses <a href="https://dazuma.github.io/toys">toys</a> for testing and CI. To
+run the test suite, <code>gem install toys</code> and then run <code>toys ci</code>. You can also run
+unit tests, rubocop, and build tests independently.</p>
+
+<h2 id="license">License</h2>
+
+<p>Copyright 2021-2026 Daniel Azuma</p>
+
+<p>Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:</p>
+
+<p>The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.</p>
+
+<p>THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.</p>
+</div></div>
+
+      <div id="footer">
+  Generated on Mon Jan  5 18:48:11 2026 by
+  <a href="https://yardoc.org" title="Yay! A Ruby Documentation Tool" target="_parent">yard</a>
+  0.9.38 (ruby-4.0.0).
+</div>
+
+    </div>
+  </body>
+</html>

@@ -1,0 +1,2013 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>
+  Class: Ractor::Wrapper
+  
+    &mdash; Ractor::Wrapper
+  
+</title>
+
+  <link rel="stylesheet" href="../css/style.css" type="text/css" />
+
+  <link rel="stylesheet" href="../css/common.css" type="text/css" />
+
+<script type="text/javascript">
+  pathId = "Ractor::Wrapper";
+  relpath = '../';
+</script>
+
+
+  <script type="text/javascript" charset="utf-8" src="../js/jquery.js"></script>
+
+  <script type="text/javascript" charset="utf-8" src="../js/app.js"></script>
+
+
+  </head>
+  <body>
+    <div class="nav_wrap">
+      <iframe id="nav" src="../class_list.html?1"></iframe>
+      <div id="resizer"></div>
+    </div>
+
+    <div id="main" tabindex="-1">
+      <div id="header">
+        <div id="menu">
+  
+    <a href="../_index.html">Index (W)</a> &raquo;
+    <span class='title'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span>
+     &raquo; 
+    <span class="title">Wrapper</span>
+  
+</div>
+
+        <div id="search">
+  
+    <a class="full_list_link" id="class_list_link"
+        href="../class_list.html">
+
+        <svg width="24" height="24">
+          <rect x="0" y="4" width="24" height="4" rx="1" ry="1"></rect>
+          <rect x="0" y="12" width="24" height="4" rx="1" ry="1"></rect>
+          <rect x="0" y="20" width="24" height="4" rx="1" ry="1"></rect>
+        </svg>
+    </a>
+  
+</div>
+        <div class="clear"></div>
+      </div>
+
+      <div id="content"><h1>Class: Ractor::Wrapper
+  
+  
+  
+</h1>
+<div class="box_info">
+  
+  <dl>
+    <dt>Inherits:</dt>
+    <dd>
+      <span class="inheritName">Object</span>
+      
+        <ul class="fullTree">
+          <li>Object</li>
+          
+            <li class="next">Ractor::Wrapper</li>
+          
+        </ul>
+        <a href="#" class="inheritanceTree">show all</a>
+      
+    </dd>
+  </dl>
+  
+
+  
+  
+  
+  
+  
+
+  
+
+  
+  <dl>
+    <dt>Defined in:</dt>
+    <dd>lib/ractor/wrapper.rb</dd>
+  </dl>
+  
+</div>
+
+<h2>Overview</h2><div class="docstring">
+  <div class="discussion">
+    <p>An experimental class that wraps a non-shareable object in an actor,
+allowing multiple Ractors to access it concurrently.</p>
+
+<p>WARNING: This is a highly experimental library, and currently <em>not</em>
+recommended for production use. (As of Ruby 4.0.0, the same can be said of
+Ractors in general.)</p>
+
+<h2 id="what-is-ractor-wrapper">What is Ractor::Wrapper?</h2>
+
+<p>For the most part, unless an object is <em>sharable</em>, which generally means
+deeply immutable along with a few other restrictions, it cannot be accessed
+directly from another Ractor. This makes it difficult for multiple Ractors
+to share a resource that is stateful. Such a resource must typically itself
+be implemented as a Ractor and accessed via message passing.</p>
+
+<p>Ractor::Wrapper makes it possible for an ordinary non-shareable object to
+be accessed from multiple Ractors. It does this by &quot;wrapping&quot; the object
+with an actor that listens for messages and invokes the object&#39;s methods in
+a controlled single-Ractor environment. It then provides a stub object that
+reproduces the interface of the original object, but responds to method
+calls by sending messages to the wrapper. Ractor::Wrapper can be used to
+implement simple actors by writing &quot;plain&quot; Ruby objects, or to adapt
+existing non-shareable objects to a multi-Ractor world.</p>
+
+<h2 id="net-http-example">Net::HTTP example</h2>
+
+<p>The following example shows how to share a single Net::HTTP session object
+among multiple Ractors.</p>
+
+<pre class="code ruby"><code class="ruby"><span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>ractor/wrapper</span><span class='tstring_end'>&quot;</span></span>
+<span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>net/http</span><span class='tstring_end'>&quot;</span></span>
+
+<span class='comment'># Create a Net::HTTP session. Net::HTTP sessions are not shareable,
+</span><span class='comment'># so normally only one Ractor can access them at a time.
+</span><span class='id identifier rubyid_http'>http</span> <span class='op'>=</span> <span class='const'>Net</span><span class='op'>::</span><span class='const'>HTTP</span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>example.com</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+<span class='id identifier rubyid_http'>http</span><span class='period'>.</span><span class='id identifier rubyid_start'>start</span>
+
+<span class='comment'># Create a wrapper around the session. This moves the session into an
+</span><span class='comment'># internal Ractor and listens for method call requests. By default, a
+</span><span class='comment'># wrapper serializes calls, handling one at a time, for compatibility
+</span><span class='comment'># with non-thread-safe objects.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>Wrapper</span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="#initialize-instance_method" title="Ractor::Wrapper#initialize (method)">new</a></span></span><span class='lparen'>(</span><span class='id identifier rubyid_http'>http</span><span class='rparen'>)</span>
+
+<span class='comment'># At this point, the session object can no longer be accessed directly
+</span><span class='comment'># because it is now owned by the wrapper&#39;s internal Ractor.
+</span><span class='comment'>#     http.get(&quot;/whoops&quot;)  # &lt;= raises Ractor::MovedError
+</span>
+<span class='comment'># However, you can access the session via the stub object provided by
+</span><span class='comment'># the wrapper. This stub proxies the call to the wrapper&#39;s internal
+</span><span class='comment'># Ractor. And it&#39;s shareable, so any number of Ractors can use it.
+</span><span class='id identifier rubyid_response'>response</span> <span class='op'>=</span> <span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_get'>get</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>/</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+
+<span class='comment'># Here, we start two Ractors, and pass the stub to each one. Each
+</span><span class='comment'># Ractor can simply call methods on the stub as if it were the original
+</span><span class='comment'># connection object. Internally, of course, the calls are proxied to
+</span><span class='comment'># the original object via the wrapper, and execution is serialized.
+</span><span class='id identifier rubyid_r1'>r1</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_stub'>stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_get'>get</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>/hello</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+<span class='id identifier rubyid_r2'>r2</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_stub'>stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_get'>get</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>/ruby</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+
+<span class='comment'># Wait for the two above Ractors to finish.
+</span><span class='id identifier rubyid_r1'>r1</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+<span class='id identifier rubyid_r2'>r2</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+
+<span class='comment'># After you stop the wrapper, you can retrieve the underlying session
+</span><span class='comment'># object and access it directly again.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_async_stop'>async_stop</span>
+<span class='id identifier rubyid_http'>http</span> <span class='op'>=</span> <span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_recover_object'>recover_object</span>
+<span class='id identifier rubyid_http'>http</span><span class='period'>.</span><span class='id identifier rubyid_finish'>finish</span>
+</code></pre>
+
+<h2 id="sqlite3-example">SQLite3 example</h2>
+
+<p>The following example shows how to share a SQLite3 database among multiple
+Ractors.</p>
+
+<pre class="code ruby"><code class="ruby"><span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>ractor/wrapper</span><span class='tstring_end'>&quot;</span></span>
+<span class='id identifier rubyid_require'>require</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>sqlite3</span><span class='tstring_end'>&quot;</span></span>
+
+<span class='comment'># Create a SQLite3 database. These objects are not shareable, so
+</span><span class='comment'># normally only one Ractor can access them.
+</span><span class='id identifier rubyid_db'>db</span> <span class='op'>=</span> <span class='const'>SQLite3</span><span class='op'>::</span><span class='const'>Database</span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='gvar'>$my_database_path</span><span class='rparen'>)</span>
+
+<span class='comment'># Create a wrapper around the database. A SQLite3::Database object
+</span><span class='comment'># cannot be moved between Ractors, so we configure the wrapper to run
+</span><span class='comment'># in the current Ractor. You can also configure it to run multiple
+</span><span class='comment'># worker threads because the database object itself is thread-safe.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>Wrapper</span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="#initialize-instance_method" title="Ractor::Wrapper#initialize (method)">new</a></span></span><span class='lparen'>(</span><span class='id identifier rubyid_db'>db</span><span class='comma'>,</span> <span class='label'>use_current_ractor:</span> <span class='kw'>true</span><span class='comma'>,</span> <span class='label'>threads:</span> <span class='int'>2</span><span class='rparen'>)</span>
+
+<span class='comment'># At this point, the database object can still be accessed directly
+</span><span class='comment'># because it hasn&#39;t been moved to a different Ractor.
+</span><span class='id identifier rubyid_rows'>rows</span> <span class='op'>=</span> <span class='id identifier rubyid_db'>db</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+
+<span class='comment'># You can also access the database via the stub object provided by the
+</span><span class='comment'># wrapper.
+</span><span class='id identifier rubyid_rows'>rows</span> <span class='op'>=</span> <span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+
+<span class='comment'># Here, we start two Ractors, and pass the stub to each one. The
+</span><span class='comment'># wrapper&#39;s two worker threads will handle the requests in the order
+</span><span class='comment'># received.
+</span><span class='id identifier rubyid_r1'>r1</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_db_stub'>db_stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_rows'>rows</span> <span class='op'>=</span> <span class='id identifier rubyid_db_stub'>db_stub</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+<span class='id identifier rubyid_r2'>r2</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_stub'>stub</span><span class='rparen'>)</span> <span class='kw'>do</span> <span class='op'>|</span><span class='id identifier rubyid_db_stub'>db_stub</span><span class='op'>|</span>
+  <span class='int'>5</span><span class='period'>.</span><span class='id identifier rubyid_times'>times</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_rows'>rows</span> <span class='op'>=</span> <span class='id identifier rubyid_db_stub'>db_stub</span><span class='period'>.</span><span class='id identifier rubyid_execute'>execute</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>select * from numbers</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='symbol'>:ok</span>
+<span class='kw'>end</span>
+
+<span class='comment'># Wait for the two above Ractors to finish.
+</span><span class='id identifier rubyid_r1'>r1</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+<span class='id identifier rubyid_r2'>r2</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+
+<span class='comment'># After stopping the wrapper, you can call the join method to wait for
+</span><span class='comment'># it to completely finish.
+</span><span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_async_stop'>async_stop</span>
+<span class='id identifier rubyid_wrapper'>wrapper</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+
+<span class='comment'># When running a wrapper with :use_current_ractor, you do not need to
+</span><span class='comment'># recover the object, because it was never moved. The recover_object
+</span><span class='comment'># method is not available.
+</span><span class='comment'>#     db2 = wrapper.recover_object  # &lt;= raises Ractor::Error
+</span></code></pre>
+
+<h2 id="features">Features</h2>
+
+<ul>
+<li>  Provides a Ractor-shareable method interface to a non-shareable object.</li>
+<li>  Supports arbitrary method arguments and return values.</li>
+<li>  Can be configured to run in its own isolated Ractor or in a Thread in
+the current Ractor.</li>
+<li>  Can be configured per method whether to copy or move arguments and
+return values.</li>
+<li>  Blocks can be run in the calling Ractor or in the object Ractor.</li>
+<li>  Raises exceptions thrown by the method.</li>
+<li>  Can serialize method calls for non-thread-safe objects, or run methods
+concurrently in multiple worker threads for thread-safe objects.</li>
+<li>  Can gracefully shut down the wrapper and retrieve the original object.</li>
+</ul>
+
+<h2 id="caveats">Caveats</h2>
+
+<ul>
+<li>  Certain types cannot be used as method arguments or return values
+because they cannot be moved between Ractors. As of Ruby 4.0.0, these
+include threads, backtraces, procs, and a few others.</li>
+<li>  As of Ruby 4.0.0, any exceptions raised are always copied (rather than
+moved) back to the calling Ractor, and the backtrace is cleared out.
+This is due to <a href="https://bugs.ruby-lang.org/issues/21818">https://bugs.ruby-lang.org/issues/21818</a></li>
+<li>  Blocks can be run &quot;in place&quot; (i.e. in the wrapped object context) only
+if the block does not access any data outside the block. Otherwise, the
+block must be run in caller&#39;s context.</li>
+<li>  Blocks configured to run in the caller&#39;s context can only be run while
+a method is executing. They cannot be &quot;saved&quot; as a proc to be run
+later unless they are configured to run &quot;in place&quot;. In particular,
+using blocks as a syntax to define callbacks can generally not be done
+through a wrapper.</li>
+</ul>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+
+</div><h2>Defined Under Namespace</h2>
+<p class="children">
+  
+    
+  
+    
+      <strong class="classes">Classes:</strong> <span class='object_link'><a href="Wrapper/MethodSettings.html" title="Ractor::Wrapper::MethodSettings (class)">MethodSettings</a></span>, <span class='object_link'><a href="Wrapper/Stub.html" title="Ractor::Wrapper::Stub (class)">Stub</a></span>
+    
+  
+</p>
+
+
+
+
+  <h2>Instance Attribute Summary <small><a href="#" class="summary_toggle">collapse</a></small></h2>
+  <ul class="summary">
+    
+      <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#name-instance_method" title="#name (instance method)">#<strong>name</strong>  &#x21d2; String </a>
+    
+
+    
+  </span>
+  
+  
+  
+    
+    
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Return the name of this wrapper.</p>
+</div></span>
+  
+</li>
+
+    
+      <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#stub-instance_method" title="#stub (instance method)">#<strong>stub</strong>  &#x21d2; Ractor::Wrapper::Stub </a>
+    
+
+    
+  </span>
+  
+  
+  
+    
+      <span class="note title readonly">readonly</span>
+    
+    
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Return the wrapper stub.</p>
+</div></span>
+  
+</li>
+
+    
+      <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#threads-instance_method" title="#threads (instance method)">#<strong>threads</strong>  &#x21d2; Integer </a>
+    
+
+    
+  </span>
+  
+  
+  
+    
+    
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Return the number of worker threads used by the wrapper.</p>
+</div></span>
+  
+</li>
+
+    
+  </ul>
+
+
+
+
+  
+    <h2>
+      Instance Method Summary
+      <small><a href="#" class="summary_toggle">collapse</a></small>
+    </h2>
+
+    <ul class="summary">
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#async_stop-instance_method" title="#async_stop (instance method)">#<strong>async_stop</strong>  &#x21d2; self </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Request that the wrapper stop.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#call-instance_method" title="#call (instance method)">#<strong>call</strong>(method_name, *args, **kwargs)  &#x21d2; Object </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>A lower-level interface for calling methods through the wrapper.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#configure_method-instance_method" title="#configure_method (instance method)">#<strong>configure_method</strong>(method_name = nil, move_data: false, move_arguments: nil, move_results: nil, move_block_arguments: nil, move_block_results: nil, execute_blocks_in_place: nil)  &#x21d2; Object </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Configure the move semantics for the given method (or the default settings if no method name is given.) That is, determine whether arguments, return values, and/or exceptions are copied or moved when communicated with the wrapper.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#enable_logging=-instance_method" title="#enable_logging= (instance method)">#<strong>enable_logging=</strong>(value)  &#x21d2; Object </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Enable or disable internal debug logging.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#enable_logging%3F-instance_method" title="#enable_logging? (instance method)">#<strong>enable_logging?</strong>  &#x21d2; Boolean </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Return whether logging is enabled for this wrapper.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#initialize-instance_method" title="#initialize (instance method)">#<strong>initialize</strong>(object, use_current_ractor: false, name: nil, threads: 0, move_data: false, move_arguments: nil, move_results: nil, move_block_arguments: nil, move_block_results: nil, execute_blocks_in_place: nil, enable_logging: false) {|_self| ... } &#x21d2; Wrapper </a>
+    
+
+    
+  </span>
+  
+  
+    <span class="note title constructor">constructor</span>
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Create a wrapper around the given object.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#join-instance_method" title="#join (instance method)">#<strong>join</strong>  &#x21d2; self </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Blocks until the wrapper has fully stopped.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#method_settings-instance_method" title="#method_settings (instance method)">#<strong>method_settings</strong>(method_name)  &#x21d2; MethodSettings </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Return the method settings for the given method name.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#recover_object-instance_method" title="#recover_object (instance method)">#<strong>recover_object</strong>  &#x21d2; Object </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Retrieves the original object that was wrapped.</p>
+</div></span>
+  
+</li>
+
+      
+        <li class="public ">
+  <span class="summary_signature">
+    
+      <a href="#use_current_ractor%3F-instance_method" title="#use_current_ractor? (instance method)">#<strong>use_current_ractor?</strong>  &#x21d2; boolean </a>
+    
+
+    
+  </span>
+  
+  
+  
+  
+  
+  
+  
+
+  
+    <span class="summary_desc"><div class='inline'><p>Determine whether this wrapper runs in the current Ractor.</p>
+</div></span>
+  
+</li>
+
+      
+    </ul>
+  
+
+<div id="constructor_details" class="method_details_list">
+  <h2>Constructor Details</h2>
+  
+    <div class="method_details first">
+  <h3 class="signature first" id="initialize-instance_method">
+  
+    #<strong>initialize</strong>(object, use_current_ractor: false, name: nil, threads: 0, move_data: false, move_arguments: nil, move_results: nil, move_block_arguments: nil, move_block_results: nil, execute_blocks_in_place: nil, enable_logging: false) {|_self| ... } &#x21d2; <tt><span class='object_link'><a href="" title="Ractor::Wrapper (class)">Wrapper</a></span></tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Create a wrapper around the given object.</p>
+
+<p>If you pass an optional block, the wrapper itself will be yielded to it,
+at which time you can set additional configuration options. In
+particular, method-specific configuration must be set in this block.
+The configuration is frozen once the object is constructed.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  <p class="tag_title">Parameters:</p>
+<ul class="param">
+  
+    <li>
+      
+        <span class='name'>object</span>
+      
+      
+        <span class='type'>(<tt>Object</tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>The non-shareable object to wrap.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>use_current_ractor</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>false</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, the wrapper is run in a
+thread in the current Ractor instead of spawning a new Ractor (the
+default behavior). This option can be used if the wrapped object
+cannot be moved or must run in the main Ractor.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>name</span>
+      
+      
+        <span class='type'>(<tt>String</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>A name for this wrapper. Used during logging.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>threads</span>
+      
+      
+        <span class='type'>(<tt>Integer</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>0</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>The number of worker threads to run.
+Defaults to 0, which causes the wrapper to run sequentially without
+spawning workers.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_data</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>false</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, all communication will by default
+move instead of copy arguments and return values. Default is false.
+This setting can be overridden by other <code>:move_*</code> settings.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_arguments</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, all arguments will be moved
+instead of copied by default. If not set, uses the <code>:move_data</code>
+setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_results</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, return values are moved instead of
+copied by default. If not set, uses the <code>:move_data</code> setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_block_arguments</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, arguments to blocks are
+moved instead of copied by default. If not set, uses the <code>:move_data</code>
+setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_block_results</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, result values from blocks
+are moved instead of copied by default. If not set, uses the
+<code>:move_data</code> setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>execute_blocks_in_place</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, blocks passed to
+methods are made shareable and passed into the wrapper to be executed
+in the wrapped environment. If false (the default), blocks are
+replaced by a proc that passes messages back out to the caller and
+executes the block in the caller&#39;s environment.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>enable_logging</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>false</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>Set to true to enable logging. Default
+is false.</p>
+</div>
+      
+    </li>
+  
+</ul>
+
+<p class="tag_title">Yields:</p>
+<ul class="yield">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>_self</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+<p class="tag_title">Yield Parameters:</p>
+<ul class="yieldparam">
+  
+    <li>
+      
+        <span class='name'>_self</span>
+      
+      
+        <span class='type'>(<tt><span class='object_link'><a href="" title="Ractor::Wrapper (class)">Ractor::Wrapper</a></span></tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>the object that the method was called on</p>
+</div>
+      
+    </li>
+  
+</ul>
+<p class="tag_title">Raises:</p>
+<ul class="raise">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>::Ractor::MovedError</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+313
+314
+315
+316
+317
+318
+319
+320
+321
+322
+323
+324
+325
+326
+327
+328
+329
+330
+331
+332
+333
+334
+335
+336
+337
+338
+339
+340
+341
+342
+343
+344
+345
+346
+347</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 313</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_initialize'>initialize</span><span class='lparen'>(</span><span class='id identifier rubyid_object'>object</span><span class='comma'>,</span>
+               <span class='label'>use_current_ractor:</span> <span class='kw'>false</span><span class='comma'>,</span>
+               <span class='label'>name:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+               <span class='label'>threads:</span> <span class='int'>0</span><span class='comma'>,</span>
+               <span class='label'>move_data:</span> <span class='kw'>false</span><span class='comma'>,</span>
+               <span class='label'>move_arguments:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+               <span class='label'>move_results:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+               <span class='label'>move_block_arguments:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+               <span class='label'>move_block_results:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+               <span class='label'>execute_blocks_in_place:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+               <span class='label'>enable_logging:</span> <span class='kw'>false</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_raise'>raise</span> <span class='op'>::</span><span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>MovedError</span><span class='comma'>,</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>cannot wrap a moved object</span><span class='tstring_end'>&quot;</span></span> <span class='kw'>if</span> <span class='op'>::</span><span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>MovedObject</span> <span class='op'>===</span> <span class='id identifier rubyid_object'>object</span>
+
+  <span class='ivar'>@method_settings</span> <span class='op'>=</span> <span class='lbrace'>{</span><span class='rbrace'>}</span>
+  <span class='kw'>self</span><span class='period'>.</span><span class='id identifier rubyid_name'>name</span> <span class='op'>=</span> <span class='id identifier rubyid_name'>name</span> <span class='op'>||</span> <span class='id identifier rubyid_object_id'>object_id</span><span class='period'>.</span><span class='id identifier rubyid_to_s'>to_s</span>
+  <span class='kw'>self</span><span class='period'>.</span><span class='id identifier rubyid_enable_logging'>enable_logging</span> <span class='op'>=</span> <span class='id identifier rubyid_enable_logging'>enable_logging</span>
+  <span class='kw'>self</span><span class='period'>.</span><span class='id identifier rubyid_threads'>threads</span> <span class='op'>=</span> <span class='id identifier rubyid_threads'>threads</span>
+  <span class='id identifier rubyid_configure_method'>configure_method</span><span class='lparen'>(</span><span class='label'>move_data:</span> <span class='id identifier rubyid_move_data'>move_data</span><span class='comma'>,</span>
+                   <span class='label'>move_arguments:</span> <span class='id identifier rubyid_move_arguments'>move_arguments</span><span class='comma'>,</span>
+                   <span class='label'>move_results:</span> <span class='id identifier rubyid_move_results'>move_results</span><span class='comma'>,</span>
+                   <span class='label'>move_block_arguments:</span> <span class='id identifier rubyid_move_block_arguments'>move_block_arguments</span><span class='comma'>,</span>
+                   <span class='label'>move_block_results:</span> <span class='id identifier rubyid_move_block_results'>move_block_results</span><span class='comma'>,</span>
+                   <span class='label'>execute_blocks_in_place:</span> <span class='id identifier rubyid_execute_blocks_in_place'>execute_blocks_in_place</span><span class='rparen'>)</span>
+  <span class='kw'>yield</span> <span class='kw'>self</span> <span class='kw'>if</span> <span class='id identifier rubyid_block_given?'>block_given?</span>
+  <span class='ivar'>@method_settings</span><span class='period'>.</span><span class='id identifier rubyid_freeze'>freeze</span>
+
+  <span class='kw'>if</span> <span class='id identifier rubyid_use_current_ractor'>use_current_ractor</span>
+    <span class='id identifier rubyid_setup_local_server'>setup_local_server</span><span class='lparen'>(</span><span class='id identifier rubyid_object'>object</span><span class='rparen'>)</span>
+  <span class='kw'>else</span>
+    <span class='id identifier rubyid_setup_isolated_server'>setup_isolated_server</span><span class='lparen'>(</span><span class='id identifier rubyid_object'>object</span><span class='rparen'>)</span>
+  <span class='kw'>end</span>
+  <span class='ivar'>@stub</span> <span class='op'>=</span> <span class='const'><span class='object_link'><a href="Wrapper/Stub.html" title="Ractor::Wrapper::Stub (class)">Stub</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="Wrapper/Stub.html#initialize-instance_method" title="Ractor::Wrapper::Stub#initialize (method)">new</a></span></span><span class='lparen'>(</span><span class='kw'>self</span><span class='rparen'>)</span>
+
+  <span class='id identifier rubyid_freeze'>freeze</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+  
+</div>
+
+  <div id="instance_attr_details" class="attr_details">
+    <h2>Instance Attribute Details</h2>
+    
+      
+      <span id="name=-instance_method"></span>
+      <div class="method_details first">
+  <h3 class="signature first" id="name-instance_method">
+  
+    #<strong>name</strong>  &#x21d2; <tt>String</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Return the name of this wrapper.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>String</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+444
+445
+446</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 444</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_name'>name</span>
+  <span class='ivar'>@name</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      
+      <span id=""></span>
+      <div class="method_details ">
+  <h3 class="signature " id="stub-instance_method">
+  
+    #<strong>stub</strong>  &#x21d2; <tt><span class='object_link'><a href="Wrapper/Stub.html" title="Ractor::Wrapper::Stub (class)">Ractor::Wrapper::Stub</a></span></tt>  <span class="extras">(readonly)</span>
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Return the wrapper stub. This is an object that responds to the same
+methods as the wrapped object, providing an easy way to call a wrapper.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt><span class='object_link'><a href="Wrapper/Stub.html" title="Ractor::Wrapper::Stub (class)">Ractor::Wrapper::Stub</a></span></tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+491
+492
+493</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 491</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_stub'>stub</span>
+  <span class='ivar'>@stub</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      
+      <span id="threads=-instance_method"></span>
+      <div class="method_details ">
+  <h3 class="signature " id="threads-instance_method">
+  
+    #<strong>threads</strong>  &#x21d2; <tt>Integer</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Return the number of worker threads used by the wrapper.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>Integer</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+469
+470
+471</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 469</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_threads'>threads</span>
+  <span class='ivar'>@threads</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+  </div>
+
+
+  <div id="instance_method_details" class="method_details_list">
+    <h2>Instance Method Details</h2>
+
+    
+      <div class="method_details first">
+  <h3 class="signature first" id="async_stop-instance_method">
+  
+    #<strong>async_stop</strong>  &#x21d2; <tt>self</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Request that the wrapper stop. All currently running calls will complete
+before the wrapper actually terminates. However, any new calls will fail.</p>
+
+<p>This method is idempotent and can be called multiple times (even from
+different ractors).</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>self</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+541
+542
+543
+544
+545
+546
+547
+548</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 541</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_async_stop'>async_stop</span>
+  <span class='id identifier rubyid_maybe_log'>maybe_log</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>Stopping wrapper</span><span class='tstring_end'>&quot;</span></span><span class='rparen'>)</span>
+  <span class='ivar'>@port</span><span class='period'>.</span><span class='id identifier rubyid_send'>send</span><span class='lparen'>(</span><span class='const'>StopMessage</span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="#initialize-instance_method" title="Ractor::Wrapper#initialize (method)">new</a></span></span><span class='period'>.</span><span class='id identifier rubyid_freeze'>freeze</span><span class='rparen'>)</span>
+  <span class='kw'>self</span>
+<span class='kw'>rescue</span> <span class='op'>::</span><span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>ClosedError</span>
+  <span class='comment'># Ignore to allow stops to be idempotent.
+</span>  <span class='kw'>self</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="call-instance_method">
+  
+    #<strong>call</strong>(method_name, *args, **kwargs)  &#x21d2; <tt>Object</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>A lower-level interface for calling methods through the wrapper.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  <p class="tag_title">Parameters:</p>
+<ul class="param">
+  
+    <li>
+      
+        <span class='name'>method_name</span>
+      
+      
+        <span class='type'>(<tt>Symbol</tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>The name of the method to call</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>args</span>
+      
+      
+        <span class='type'>(<tt>arguments</tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>The positional arguments</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>kwargs</span>
+      
+      
+        <span class='type'>(<tt>keywords</tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>The keyword arguments</p>
+</div>
+      
+    </li>
+  
+</ul>
+
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>Object</tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>The return value</p>
+</div>
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+501
+502
+503
+504
+505
+506
+507
+508
+509
+510
+511
+512
+513
+514
+515
+516
+517
+518
+519
+520
+521
+522
+523
+524
+525
+526
+527
+528
+529
+530</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 501</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_call'>call</span><span class='lparen'>(</span><span class='id identifier rubyid_method_name'>method_name</span><span class='comma'>,</span> <span class='op'>*</span><span class='id identifier rubyid_args'>args</span><span class='comma'>,</span> <span class='op'>**</span><span class='id identifier rubyid_kwargs'>kwargs</span><span class='comma'>,</span> <span class='op'>&amp;</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_reply_port'>reply_port</span> <span class='op'>=</span> <span class='op'>::</span><span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>Port</span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span>
+  <span class='id identifier rubyid_transaction'>transaction</span> <span class='op'>=</span> <span class='op'>::</span><span class='const'>Random</span><span class='period'>.</span><span class='id identifier rubyid_rand'>rand</span><span class='lparen'>(</span><span class='int'>7_958_661_109_946_400_884_391_936</span><span class='rparen'>)</span><span class='period'>.</span><span class='id identifier rubyid_to_s'>to_s</span><span class='lparen'>(</span><span class='int'>36</span><span class='rparen'>)</span><span class='period'>.</span><span class='id identifier rubyid_freeze'>freeze</span>
+  <span class='id identifier rubyid_settings'>settings</span> <span class='op'>=</span> <span class='id identifier rubyid_method_settings'>method_settings</span><span class='lparen'>(</span><span class='id identifier rubyid_method_name'>method_name</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_block_arg'>block_arg</span> <span class='op'>=</span> <span class='id identifier rubyid_make_block_arg'>make_block_arg</span><span class='lparen'>(</span><span class='id identifier rubyid_settings'>settings</span><span class='comma'>,</span> <span class='op'>&amp;</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_message'>message</span> <span class='op'>=</span> <span class='const'>CallMessage</span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="#initialize-instance_method" title="Ractor::Wrapper#initialize (method)">new</a></span></span><span class='lparen'>(</span><span class='label'>method_name:</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='comma'>,</span>
+                            <span class='label'>args:</span> <span class='id identifier rubyid_args'>args</span><span class='comma'>,</span>
+                            <span class='label'>kwargs:</span> <span class='id identifier rubyid_kwargs'>kwargs</span><span class='comma'>,</span>
+                            <span class='label'>block_arg:</span> <span class='id identifier rubyid_block_arg'>block_arg</span><span class='comma'>,</span>
+                            <span class='label'>transaction:</span> <span class='id identifier rubyid_transaction'>transaction</span><span class='comma'>,</span>
+                            <span class='label'>settings:</span> <span class='id identifier rubyid_settings'>settings</span><span class='comma'>,</span>
+                            <span class='label'>reply_port:</span> <span class='id identifier rubyid_reply_port'>reply_port</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_maybe_log'>maybe_log</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>Sending method</span><span class='tstring_end'>&quot;</span></span><span class='comma'>,</span> <span class='label'>method_name:</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='comma'>,</span> <span class='label'>transaction:</span> <span class='id identifier rubyid_transaction'>transaction</span><span class='rparen'>)</span>
+  <span class='ivar'>@port</span><span class='period'>.</span><span class='id identifier rubyid_send'>send</span><span class='lparen'>(</span><span class='id identifier rubyid_message'>message</span><span class='comma'>,</span> <span class='label'>move:</span> <span class='id identifier rubyid_settings'>settings</span><span class='period'>.</span><span class='id identifier rubyid_move_arguments?'>move_arguments?</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_loop'>loop</span> <span class='kw'>do</span>
+    <span class='id identifier rubyid_reply_message'>reply_message</span> <span class='op'>=</span> <span class='id identifier rubyid_reply_port'>reply_port</span><span class='period'>.</span><span class='id identifier rubyid_receive'>receive</span>
+    <span class='kw'>case</span> <span class='id identifier rubyid_reply_message'>reply_message</span>
+    <span class='kw'>when</span> <span class='const'>YieldMessage</span>
+      <span class='id identifier rubyid_handle_yield'>handle_yield</span><span class='lparen'>(</span><span class='id identifier rubyid_reply_message'>reply_message</span><span class='comma'>,</span> <span class='id identifier rubyid_transaction'>transaction</span><span class='comma'>,</span> <span class='id identifier rubyid_settings'>settings</span><span class='comma'>,</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='comma'>,</span> <span class='op'>&amp;</span><span class='rparen'>)</span>
+    <span class='kw'>when</span> <span class='const'>ReturnMessage</span>
+      <span class='id identifier rubyid_maybe_log'>maybe_log</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>Received result</span><span class='tstring_end'>&quot;</span></span><span class='comma'>,</span> <span class='label'>method_name:</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='comma'>,</span> <span class='label'>transaction:</span> <span class='id identifier rubyid_transaction'>transaction</span><span class='rparen'>)</span>
+      <span class='id identifier rubyid_reply_port'>reply_port</span><span class='period'>.</span><span class='id identifier rubyid_close'>close</span>
+      <span class='kw'>return</span> <span class='id identifier rubyid_reply_message'>reply_message</span><span class='period'>.</span><span class='id identifier rubyid_value'>value</span>
+    <span class='kw'>when</span> <span class='const'>ExceptionMessage</span>
+      <span class='id identifier rubyid_maybe_log'>maybe_log</span><span class='lparen'>(</span><span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>Received exception</span><span class='tstring_end'>&quot;</span></span><span class='comma'>,</span> <span class='label'>method_name:</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='comma'>,</span> <span class='label'>transaction:</span> <span class='id identifier rubyid_transaction'>transaction</span><span class='rparen'>)</span>
+      <span class='id identifier rubyid_reply_port'>reply_port</span><span class='period'>.</span><span class='id identifier rubyid_close'>close</span>
+      <span class='id identifier rubyid_raise'>raise</span> <span class='id identifier rubyid_reply_message'>reply_message</span><span class='period'>.</span><span class='id identifier rubyid_exception'>exception</span>
+    <span class='kw'>end</span>
+  <span class='kw'>end</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="configure_method-instance_method">
+  
+    #<strong>configure_method</strong>(method_name = nil, move_data: false, move_arguments: nil, move_results: nil, move_block_arguments: nil, move_block_results: nil, execute_blocks_in_place: nil)  &#x21d2; <tt>Object</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Configure the move semantics for the given method (or the default
+settings if no method name is given.) That is, determine whether
+arguments, return values, and/or exceptions are copied or moved when
+communicated with the wrapper. By default, all objects are copied.</p>
+
+<p>This method can be called only during an initialization block.
+All settings are frozen once the wrapper is active.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  <p class="tag_title">Parameters:</p>
+<ul class="param">
+  
+    <li>
+      
+        <span class='name'>method_name</span>
+      
+      
+        <span class='type'>(<tt>Symbol</tt>, <tt>nil</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>The name of the method being configured,
+or <code>nil</code> to set defaults for all methods not configured explicitly.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_data</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>false</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, communication for this method will
+move instead of copy arguments and return values. Default is false.
+This setting can be overridden by other <code>:move_*</code> settings.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_arguments</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, arguments for this method are
+moved instead of copied. If not set, uses the <code>:move_data</code> setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_results</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, return values for this method are
+moved instead of copied. If not set, uses the <code>:move_data</code> setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_block_arguments</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, arguments to blocks passed
+to this method are moved instead of copied. If not set, uses the
+<code>:move_data</code> setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>move_block_results</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, result values from blocks
+passed to this method are moved instead of copied. If not set, uses
+the <code>:move_data</code> setting.</p>
+</div>
+      
+    </li>
+  
+    <li>
+      
+        <span class='name'>execute_blocks_in_place</span>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+        <em class="default">(defaults to: <tt>nil</tt>)</em>
+      
+      
+        &mdash;
+        <div class='inline'><p>If true, blocks passed to this
+method are made shareable and passed into the wrapper to be executed
+in the wrapped environment. If false (the default), blocks are
+replaced by a proc that passes messages back out to the caller and
+executes the block in the caller&#39;s environment.</p>
+</div>
+      
+    </li>
+  
+</ul>
+
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+422
+423
+424
+425
+426
+427
+428
+429
+430
+431
+432
+433
+434
+435
+436
+437</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 422</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_configure_method'>configure_method</span><span class='lparen'>(</span><span class='id identifier rubyid_method_name'>method_name</span> <span class='op'>=</span> <span class='kw'>nil</span><span class='comma'>,</span>
+                     <span class='label'>move_data:</span> <span class='kw'>false</span><span class='comma'>,</span>
+                     <span class='label'>move_arguments:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+                     <span class='label'>move_results:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+                     <span class='label'>move_block_arguments:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+                     <span class='label'>move_block_results:</span> <span class='kw'>nil</span><span class='comma'>,</span>
+                     <span class='label'>execute_blocks_in_place:</span> <span class='kw'>nil</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_method_name'>method_name</span> <span class='op'>=</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='period'>.</span><span class='id identifier rubyid_to_sym'>to_sym</span> <span class='kw'>unless</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='period'>.</span><span class='id identifier rubyid_nil?'>nil?</span>
+  <span class='ivar'>@method_settings</span><span class='lbracket'>[</span><span class='id identifier rubyid_method_name'>method_name</span><span class='rbracket'>]</span> <span class='op'>=</span>
+    <span class='const'><span class='object_link'><a href="Wrapper/MethodSettings.html" title="Ractor::Wrapper::MethodSettings (class)">MethodSettings</a></span></span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span><span class='lparen'>(</span><span class='label'>move_data:</span> <span class='id identifier rubyid_move_data'>move_data</span><span class='comma'>,</span>
+                       <span class='label'>move_arguments:</span> <span class='id identifier rubyid_move_arguments'>move_arguments</span><span class='comma'>,</span>
+                       <span class='label'>move_results:</span> <span class='id identifier rubyid_move_results'>move_results</span><span class='comma'>,</span>
+                       <span class='label'>move_block_arguments:</span> <span class='id identifier rubyid_move_block_arguments'>move_block_arguments</span><span class='comma'>,</span>
+                       <span class='label'>move_block_results:</span> <span class='id identifier rubyid_move_block_results'>move_block_results</span><span class='comma'>,</span>
+                       <span class='label'>execute_blocks_in_place:</span> <span class='id identifier rubyid_execute_blocks_in_place'>execute_blocks_in_place</span><span class='rparen'>)</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="enable_logging=-instance_method">
+  
+    #<strong>enable_logging=</strong>(value)  &#x21d2; <tt>Object</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Enable or disable internal debug logging.</p>
+
+<p>This method can be called only during an initialization block.
+All settings are frozen once the wrapper is active.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  <p class="tag_title">Parameters:</p>
+<ul class="param">
+  
+    <li>
+      
+        <span class='name'>value</span>
+      
+      
+        <span class='type'>(<tt>Boolean</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+375
+376
+377</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 375</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_enable_logging='>enable_logging=</span><span class='lparen'>(</span><span class='id identifier rubyid_value'>value</span><span class='rparen'>)</span>
+  <span class='ivar'>@enable_logging</span> <span class='op'>=</span> <span class='id identifier rubyid_value'>value</span> <span class='op'>?</span> <span class='kw'>true</span> <span class='op'>:</span> <span class='kw'>false</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="enable_logging?-instance_method">
+  
+    #<strong>enable_logging?</strong>  &#x21d2; <tt>Boolean</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Return whether logging is enabled for this wrapper.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>Boolean</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+460
+461
+462</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 460</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_enable_logging?'>enable_logging?</span>
+  <span class='ivar'>@enable_logging</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="join-instance_method">
+  
+    #<strong>join</strong>  &#x21d2; <tt>self</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Blocks until the wrapper has fully stopped.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>self</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+555
+556
+557
+558
+559
+560
+561
+562
+563
+564
+565
+566
+567</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 555</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_join'>join</span>
+  <span class='kw'>if</span> <span class='ivar'>@ractor</span>
+    <span class='ivar'>@ractor</span><span class='period'>.</span><span class='id identifier rubyid_join'>join</span>
+  <span class='kw'>else</span>
+    <span class='id identifier rubyid_reply_port'>reply_port</span> <span class='op'>=</span> <span class='op'>::</span><span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>Port</span><span class='period'>.</span><span class='id identifier rubyid_new'>new</span>
+    <span class='ivar'>@port</span><span class='period'>.</span><span class='id identifier rubyid_send'>send</span><span class='lparen'>(</span><span class='const'>JoinMessage</span><span class='period'>.</span><span class='id identifier rubyid_new'><span class='object_link'><a href="#initialize-instance_method" title="Ractor::Wrapper#initialize (method)">new</a></span></span><span class='lparen'>(</span><span class='id identifier rubyid_reply_port'>reply_port</span><span class='rparen'>)</span><span class='rparen'>)</span>
+    <span class='id identifier rubyid_reply_port'>reply_port</span><span class='period'>.</span><span class='id identifier rubyid_receive'>receive</span>
+    <span class='id identifier rubyid_reply_port'>reply_port</span><span class='period'>.</span><span class='id identifier rubyid_close'>close</span>
+  <span class='kw'>end</span>
+  <span class='kw'>self</span>
+<span class='kw'>rescue</span> <span class='op'>::</span><span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>ClosedError</span>
+  <span class='kw'>self</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="method_settings-instance_method">
+  
+    #<strong>method_settings</strong>(method_name)  &#x21d2; <tt><span class='object_link'><a href="Wrapper/MethodSettings.html" title="Ractor::Wrapper::MethodSettings (class)">MethodSettings</a></span></tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Return the method settings for the given method name. This returns the
+default method settings if the given method is not configured explicitly
+by name.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  <p class="tag_title">Parameters:</p>
+<ul class="param">
+  
+    <li>
+      
+        <span class='name'>method_name</span>
+      
+      
+        <span class='type'>(<tt>Symbol</tt>, <tt>nil</tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>The method name, or <code>nil</code> to return the
+defaults.</p>
+</div>
+      
+    </li>
+  
+</ul>
+
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt><span class='object_link'><a href="Wrapper/MethodSettings.html" title="Ractor::Wrapper::MethodSettings (class)">MethodSettings</a></span></tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+480
+481
+482
+483</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 480</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_method_settings'>method_settings</span><span class='lparen'>(</span><span class='id identifier rubyid_method_name'>method_name</span><span class='rparen'>)</span>
+  <span class='id identifier rubyid_method_name'>method_name</span> <span class='op'>=</span> <span class='id identifier rubyid_method_name'>method_name</span><span class='period'>.</span><span class='id identifier rubyid_to_sym'>to_sym</span>
+  <span class='ivar'>@method_settings</span><span class='lbracket'>[</span><span class='id identifier rubyid_method_name'>method_name</span><span class='rbracket'>]</span> <span class='op'>||</span> <span class='ivar'>@method_settings</span><span class='lbracket'>[</span><span class='kw'>nil</span><span class='rbracket'>]</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="recover_object-instance_method">
+  
+    #<strong>recover_object</strong>  &#x21d2; <tt>Object</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Retrieves the original object that was wrapped. This should be called
+only after a stop request has been issued using <span class='object_link'><a href="#async_stop-instance_method" title="Ractor::Wrapper#async_stop (method)">#async_stop</a></span>, and may
+block until the wrapper has fully stopped.</p>
+
+<p>This can be called only if the wrapper was <em>not</em> configured with
+<code>use_current_ractor: true</code>. If the wrapper had that configuration, the
+object will not be moved, and does not need to be recovered. In such a
+case, any calls to this method will raise Ractor::Error.</p>
+
+<p>Only one ractor may call this method; any additional calls will fail with
+a Ractor::Error.</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>Object</tt>)</span>
+      
+      
+      
+        &mdash;
+        <div class='inline'><p>The original wrapped object</p>
+</div>
+      
+    </li>
+  
+</ul>
+<p class="tag_title">Raises:</p>
+<ul class="raise">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>::Ractor::Error</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+584
+585
+586
+587</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 584</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_recover_object'>recover_object</span>
+  <span class='id identifier rubyid_raise'>raise</span> <span class='op'>::</span><span class='const'><span class='object_link'><a href="../Ractor.html" title="Ractor (class)">Ractor</a></span></span><span class='op'>::</span><span class='const'>Error</span><span class='comma'>,</span> <span class='tstring'><span class='tstring_beg'>&quot;</span><span class='tstring_content'>cannot recover an object from a local wrapper</span><span class='tstring_end'>&quot;</span></span> <span class='kw'>unless</span> <span class='ivar'>@ractor</span>
+  <span class='ivar'>@ractor</span><span class='period'>.</span><span class='id identifier rubyid_value'>value</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+      <div class="method_details ">
+  <h3 class="signature " id="use_current_ractor?-instance_method">
+  
+    #<strong>use_current_ractor?</strong>  &#x21d2; <tt>boolean</tt> 
+  
+
+  
+
+  
+</h3><div class="docstring">
+  <div class="discussion">
+    <p>Determine whether this wrapper runs in the current Ractor</p>
+
+
+  </div>
+</div>
+<div class="tags">
+  
+<p class="tag_title">Returns:</p>
+<ul class="return">
+  
+    <li>
+      
+      
+        <span class='type'>(<tt>boolean</tt>)</span>
+      
+      
+      
+    </li>
+  
+</ul>
+
+</div><table class="source_code">
+  <tr>
+    <td>
+      <pre class="lines">
+
+
+451
+452
+453</pre>
+    </td>
+    <td>
+      <pre class="code"><span class="info file"># File 'lib/ractor/wrapper.rb', line 451</span>
+
+<span class='kw'>def</span> <span class='id identifier rubyid_use_current_ractor?'>use_current_ractor?</span>
+  <span class='ivar'>@ractor</span><span class='period'>.</span><span class='id identifier rubyid_nil?'>nil?</span>
+<span class='kw'>end</span></pre>
+    </td>
+  </tr>
+</table>
+</div>
+    
+  </div>
+
+</div>
+
+      <div id="footer">
+  Generated on Mon Jan  5 18:48:11 2026 by
+  <a href="https://yardoc.org" title="Yay! A Ruby Documentation Tool" target="_parent">yard</a>
+  0.9.38 (ruby-4.0.0).
+</div>
+
+    </div>
+  </body>
+</html>
