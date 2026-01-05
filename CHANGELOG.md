@@ -1,5 +1,11 @@
 # Release History
 
+### v0.3.0 / 2026-01-05
+
+* ADDED: Updated for Ruby 4.0
+* ADDED: Support wrappers running in the current ractor
+* ADDED: Support for running sequentially without worker threads
+
 ### v0.2.0 / 2021-03-08
 
 * BREAKING CHANGE: The wrapper now copies (instead of moves) arguments and return values by default.
