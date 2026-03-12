@@ -5,18 +5,20 @@
   </head>
   <body>
     <p>
-      <a href="https://dazuma.github.io/ractor-wrapper/gem/index.html">Main documentation page</a>
+      <a href="https://dazuma.github.io/ractor-wrapper/gem/latest">Main documentation page</a>
     </p>
   </body>
   <script>
     var version = "0.3.0";
     var location_updated = false;
-    if (!location_updated && window.location.href.includes("//dazuma.github.io/ractor-wrapper/gem/latest")) {
+    if (!location_updated) {
       var loc = window.location.href.replace(
-        "//dazuma.github.io/ractor-wrapper/gem/latest",
-        "//dazuma.github.io/ractor-wrapper/gem/v" + version);
-      window.location.replace(loc);
-      location_updated = true;
+        new RegExp("//dazuma\\.github\\.io/ractor\\-wrapper/gem/latest(/|$)"),
+        "//dazuma.github.io/ractor-wrapper/gem/v" + version + "/");
+      if (window.location.href != loc) {
+        window.location.replace(loc);
+        location_updated = true;
+      }
     }
     if (!location_updated) {
       window.location.replace("https://dazuma.github.io/ractor-wrapper/gem/latest");
