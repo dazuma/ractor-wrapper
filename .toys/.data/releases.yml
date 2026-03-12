@@ -1,8 +1,10 @@
 repo: dazuma/ractor-wrapper
 git_user_name: Daniel Azuma
 git_user_email: dazuma@gmail.com
+required_checks: false
+update_existing_requests: true
+issue_number_suffix_handling: delete
 
 gems:
   - name: ractor-wrapper
-    directory: .
     gh_pages_directory: gem
