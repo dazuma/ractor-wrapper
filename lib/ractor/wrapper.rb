@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
 ##
-# See ruby-doc.org for info on Ractors.
+# See https://docs.ruby-lang.org/en/4.0/language/ractor_md.html for info on
+# Ractors.
 #
 class Ractor
   ##
@@ -206,6 +207,155 @@ class Ractor
     end
 
     ##
+    # Configuration for a {Ractor::Wrapper}. An instance of this class is
+    # yielded by {Ractor::Wrapper#initialize} if a block is provided. Any
+    # settings made to the Configuration before the block returns take
+    # effect when the Wrapper is constructed.
+    #
+    class Configuration
+      ##
+      # Set the name of the wrapper. This is shown in logging and is also
+      # used as the name of the wrapping Ractor.
+      #
+      # @param value [String, nil]
+      #
+      def name=(value)
+        @name = value ? value.to_s.freeze : nil
+      end
+
+      ##
+      # Enable or disable internal debug logging.
+      #
+      # @param value [Boolean]
+      #
+      def enable_logging=(value)
+        @enable_logging = value ? true : false
+      end
+
+      ##
+      # Set the number of worker threads. If the underlying object is
+      # thread-safe, a value of 2 or more allows concurrent calls. Leave at
+      # the default of 0 to handle calls sequentially without worker threads.
+      #
+      # @param value [Integer]
+      #
+      def threads=(value)
+        value = value.to_i
+        value = 0 if value.negative?
+        @threads = value
+      end
+
+      ##
+      # If set to true, the wrapper server runs as Thread(s) inside the
+      # current Ractor rather than spawning a new isolated Ractor. Use this
+      # for objects that cannot be moved between Ractors.
+      #
+      # @param value [Boolean]
+      #
+      def use_current_ractor=(value)
+        @use_current_ractor = value ? true : false
+      end
+
+      ##
+      # Configure the move semantics for the given method (or the default
+      # settings if no method name is given.) That is, determine whether
+      # arguments, return values, and/or exceptions are copied or moved when
+      # communicated with the wrapper. By default, all objects are copied.
+      #
+      # @param method_name [Symbol, nil] The name of the method being configured,
+      #     or `nil` to set defaults for all methods not configured explicitly.
+      # @param move_data [boolean] If true, communication for this method will
+      #     move instead of copy arguments and return values. Default is false.
+      #     This setting can be overridden by other `:move_*` settings.
+      # @param move_arguments [boolean] If true, arguments for this method are
+      #     moved instead of copied. If not set, uses the `:move_data` setting.
+      # @param move_results [boolean] If true, return values for this method are
+      #     moved instead of copied. If not set, uses the `:move_data` setting.
+      # @param move_block_arguments [boolean] If true, arguments to blocks passed
+      #     to this method are moved instead of copied. If not set, uses the
+      #     `:move_data` setting.
+      # @param move_block_results [boolean] If true, result values from blocks
+      #     passed to this method are moved instead of copied. If not set, uses
+      #     the `:move_data` setting.
+      # @param execute_blocks_in_place [boolean] If true, blocks passed to this
+      #     method are made shareable and passed into the wrapper to be executed
+      #     in the wrapped environment. If false (the default), blocks are
+      #     replaced by a proc that passes messages back out to the caller and
+      #     executes the block in the caller's environment.
+      #
+      def configure_method(method_name = nil,
+                           move_data: false,
+                           move_arguments: nil,
+                           move_results: nil,
+                           move_block_arguments: nil,
+                           move_block_results: nil,
+                           execute_blocks_in_place: nil)
+        method_name = method_name.to_sym unless method_name.nil?
+        @method_settings[method_name] =
+          MethodSettings.new(move_data: move_data,
+                             move_arguments: move_arguments,
+                             move_results: move_results,
+                             move_block_arguments: move_block_arguments,
+                             move_block_results: move_block_results,
+                             execute_blocks_in_place: execute_blocks_in_place)
+        self
+      end
+
+      ##
+      # @private
+      # Return the name of the wrapper.
+      #
+      # @return [String, nil]
+      #
+      attr_reader :name
+
+      ##
+      # @private
+      # Return whether logging is enabled.
+      #
+      # @return [Boolean]
+      #
+      attr_reader :enable_logging
+
+      ##
+      # @private
+      # Return the number of worker threads.
+      #
+      # @return [Integer]
+      #
+      attr_reader :threads
+
+      ##
+      # @private
+      # Return whether the wrapper runs in the current Ractor.
+      #
+      # @return [Boolean]
+      #
+      attr_reader :use_current_ractor
+
+      ##
+      # @private
+      # Return the method settings keyed by method name. The `nil` key will
+      # contain defaults for method names not explicitly configured. This
+      # hash is a frozen snapshot and cannot be modified.
+      #
+      # @return [Hash{(Symbol,nil)=>MethodSettings}]
+      #
+      def method_settings
+        @method_settings.dup.freeze
+      end
+
+      ##
+      # @private
+      # Create an empty configuration. All settings must be set at least once
+      # before they can be read.
+      #
+      def initialize
+        @method_settings = {}
+      end
+    end
+
+    ##
     # Settings for a method call. Specifies how a method's arguments and
     # return value are communicated (i.e. copy or move semantics.)
     #
@@ -274,20 +424,22 @@ class Ractor
     ##
     # Create a wrapper around the given object.
     #
-    # If you pass an optional block, the wrapper itself will be yielded to it,
-    # at which time you can set additional configuration options. In
-    # particular, method-specific configuration must be set in this block.
-    # The configuration is frozen once the object is constructed.
+    # If you pass an optional block, a {Ractor::Wrapper::Configuration} object
+    # will be yielded to it, allowing additional configuration before the wrapper
+    # starts. In particular, per-method configuration must be set in this block.
+    # Block settings override keyword arguments when both are provided.
     #
     # @param object [Object] The non-shareable object to wrap.
     # @param use_current_ractor [boolean] If true, the wrapper is run in a
     #     thread in the current Ractor instead of spawning a new Ractor (the
     #     default behavior). This option can be used if the wrapped object
-    #     cannot be moved or must run in the main Ractor.
-    # @param name [String] A name for this wrapper. Used during logging.
+    #     cannot be moved or must run in the main Ractor. Can also be set via
+    #     the configuration block.
+    # @param name [String] A name for this wrapper. Used during logging. Can
+    #     also be set via the configuration block.
     # @param threads [Integer] The number of worker threads to run.
     #     Defaults to 0, which causes the wrapper to run sequentially without
-    #     spawning workers.
+    #     spawning workers. Can also be set via the configuration block.
     # @param move_data [boolean] If true, all communication will by default
     #     move instead of copy arguments and return values. Default is false.
     #     This setting can be overridden by other `:move_*` settings.
@@ -308,7 +460,9 @@ class Ractor
     #     replaced by a proc that passes messages back out to the caller and
     #     executes the block in the caller's environment.
     # @param enable_logging [boolean] Set to true to enable logging. Default
-    #     is false.
+    #     is false. Can also be set via the configuration block.
+    # @yield [config] An optional configuration block.
+    # @yieldparam config [Ractor::Wrapper::Configuration]
     #
     def initialize(object,
                    use_current_ractor: false,
@@ -323,20 +477,24 @@ class Ractor
                    enable_logging: false)
       raise ::Ractor::MovedError, "cannot wrap a moved object" if ::Ractor::MovedObject === object
 
-      @method_settings = {}
-      self.name = name || object_id.to_s
-      self.enable_logging = enable_logging
-      self.threads = threads
-      configure_method(move_data: move_data,
-                       move_arguments: move_arguments,
-                       move_results: move_results,
-                       move_block_arguments: move_block_arguments,
-                       move_block_results: move_block_results,
-                       execute_blocks_in_place: execute_blocks_in_place)
-      yield self if block_given?
-      @method_settings.freeze
+      config = Configuration.new
+      config.name = name || object_id
+      config.enable_logging = enable_logging
+      config.threads = threads
+      config.use_current_ractor = use_current_ractor
+      config.configure_method(move_data: move_data,
+                              move_arguments: move_arguments,
+                              move_results: move_results,
+                              move_block_arguments: move_block_arguments,
+                              move_block_results: move_block_results,
+                              execute_blocks_in_place: execute_blocks_in_place)
+      yield config if block_given?
 
-      if use_current_ractor
+      @name = config.name
+      @enable_logging = config.enable_logging
+      @threads = config.threads
+      @method_settings = config.method_settings
+      if config.use_current_ractor
         setup_local_server(object)
       else
         setup_isolated_server(object)
@@ -344,96 +502,6 @@ class Ractor
       @stub = Stub.new(self)
 
       freeze
-    end
-
-    ##
-    # Set the number of threads to run in the wrapper. If the underlying object
-    # is thread-safe, setting a value of 2 or more allows concurrent calls to
-    # it. If the underlying object is not thread-safe, you should leave this
-    # set to its default of 0, which disables worker threads and handles all
-    # calls sequentially.
-    #
-    # This method can be called only during an initialization block.
-    # All settings are frozen once the wrapper is active.
-    #
-    # @param value [Integer]
-    #
-    def threads=(value)
-      value = value.to_i
-      value = 0 if value.negative?
-      @threads = value
-    end
-
-    ##
-    # Enable or disable internal debug logging.
-    #
-    # This method can be called only during an initialization block.
-    # All settings are frozen once the wrapper is active.
-    #
-    # @param value [Boolean]
-    #
-    def enable_logging=(value)
-      @enable_logging = value ? true : false
-    end
-
-    ##
-    # Set the name of this wrapper. This is shown in logging, and is also used
-    # as the name of the wrapping Ractor.
-    #
-    # This method can be called only during an initialization block.
-    # All settings are frozen once the wrapper is active.
-    #
-    # @param value [String, nil]
-    #
-    def name=(value)
-      @name = value ? value.to_s.freeze : nil
-    end
-
-    ##
-    # Configure the move semantics for the given method (or the default
-    # settings if no method name is given.) That is, determine whether
-    # arguments, return values, and/or exceptions are copied or moved when
-    # communicated with the wrapper. By default, all objects are copied.
-    #
-    # This method can be called only during an initialization block.
-    # All settings are frozen once the wrapper is active.
-    #
-    # @param method_name [Symbol, nil] The name of the method being configured,
-    #     or `nil` to set defaults for all methods not configured explicitly.
-    # @param move_data [boolean] If true, communication for this method will
-    #     move instead of copy arguments and return values. Default is false.
-    #     This setting can be overridden by other `:move_*` settings.
-    # @param move_arguments [boolean] If true, arguments for this method are
-    #     moved instead of copied. If not set, uses the `:move_data` setting.
-    # @param move_results [boolean] If true, return values for this method are
-    #     moved instead of copied. If not set, uses the `:move_data` setting.
-    # @param move_block_arguments [boolean] If true, arguments to blocks passed
-    #     to this method are moved instead of copied. If not set, uses the
-    #     `:move_data` setting.
-    # @param move_block_results [boolean] If true, result values from blocks
-    #     passed to this method are moved instead of copied. If not set, uses
-    #     the `:move_data` setting.
-    # @param execute_blocks_in_place [boolean] If true, blocks passed to this
-    #     method are made shareable and passed into the wrapper to be executed
-    #     in the wrapped environment. If false (the default), blocks are
-    #     replaced by a proc that passes messages back out to the caller and
-    #     executes the block in the caller's environment.
-    #
-    def configure_method(method_name = nil,
-                         move_data: false,
-                         move_arguments: nil,
-                         move_results: nil,
-                         move_block_arguments: nil,
-                         move_block_results: nil,
-                         execute_blocks_in_place: nil)
-      method_name = method_name.to_sym unless method_name.nil?
-      @method_settings[method_name] =
-        MethodSettings.new(move_data: move_data,
-                           move_arguments: move_arguments,
-                           move_results: move_results,
-                           move_block_arguments: move_block_arguments,
-                           move_block_results: move_block_results,
-                           execute_blocks_in_place: execute_blocks_in_place)
     end
 
     ##
@@ -478,8 +546,7 @@ class Ractor
     # @return [MethodSettings]
     #
     def method_settings(method_name)
-      method_name = method_name.to_sym
-      @method_settings[method_name] || @method_settings[nil]
+      (method_name && @method_settings[method_name.to_sym]) || @method_settings[nil]
     end
 
     ##
@@ -500,7 +567,7 @@ class Ractor
     #
     def call(method_name, *args, **kwargs, &)
       reply_port = ::Ractor::Port.new
-      transaction = ::Random.rand(7_958_661_109_946_400_884_391_936).to_s(36).freeze
+      transaction = make_transaction
       settings = method_settings(method_name)
       block_arg = make_block_arg(settings, &)
       message = CallMessage.new(method_name: method_name,
@@ -676,7 +743,7 @@ class Ractor
     # Create a transaction ID, used for logging
     #
     def make_transaction
-      ::Random.rand(7_958_661_109_946_400_884_391_936).to_s(36).freeze
+      ::Random.rand(7_958_661_109_946_400_884_391_936).to_s(36).rjust(16, "0").freeze
     end
 
     ##
@@ -767,7 +834,8 @@ class Ractor
         @port = port
         @name = name
         @enable_logging = enable_logging
-        @threads = threads.positive? ? threads : nil
+        @threading_enabled = threads.positive?
+        @active_workers = threads
         @join_requests = []
       end
 
@@ -779,9 +847,9 @@ class Ractor
       #
       def run
         receive_remote_object if @isolated
-        start_workers if @threads
+        start_workers if @threading_enabled
         main_loop
-        stop_workers if @threads
+        stop_workers if @threading_enabled
         cleanup
         @object
       rescue ::StandardError => e
@@ -806,8 +874,8 @@ class Ractor
       #
       def start_workers
         @queue = ::Queue.new
-        maybe_log("Spawning #{@threads} worker threads")
-        (1..@threads).map do |worker_num|
+        maybe_log("Spawning #{@active_workers} worker threads")
+        (1..@active_workers).map do |worker_num|
           ::Thread.new { worker_thread(worker_num) }
         end
       end
@@ -834,14 +902,14 @@ class Ractor
           case message
           when CallMessage
             maybe_log("Received CallMessage", call_message: message)
-            if @threads
+            if @threading_enabled
               @queue.enq(message)
             else
               handle_method(message)
             end
           when WorkerStoppedMessage
             maybe_log("Received unexpected WorkerStoppedMessage")
-            @threads -= 1 if @threads
+            @active_workers -= 1 if @threading_enabled
             break
           when StopMessage
             maybe_log("Received stop")
@@ -876,7 +944,7 @@ class Ractor
       #
       def stop_workers
         @queue.close
-        while @threads.positive?
+        while @active_workers.positive?
           maybe_log("Waiting for message in stopping phase")
           message = @port.receive
           case message
@@ -884,7 +952,7 @@ class Ractor
             refuse_method(message)
           when WorkerStoppedMessage
             maybe_log("Acknowledged WorkerStoppedMessage: #{message.worker_num}")
-            @threads -= 1
+            @active_workers -= 1
           when StopMessage
             maybe_log("Stop received when already stopping")
           when JoinMessage

@@ -183,6 +183,9 @@ wrapper.join
     later unless they are configured to run "in place". In particular,
     using blocks as a syntax to define callbacks can generally not be done
     through a wrapper.
+*   Wrappers do basic detection of unexpected issues and attempt to clean up,
+    but it's still possible that a hard crash of a wrapper could leave callers
+    hanging. See https://github.com/dazuma/ractor-wrapper/issues/8
 
 ## Contributing
 
