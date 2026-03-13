@@ -5,6 +5,44 @@ require "helper"
 describe ::Ractor::Wrapper do
   let(:remote) { RemoteObject.new }
 
+  describe "initialization block" do
+    after { @wrapper&.async_stop&.join }
+
+    it "yields a Configuration, not the Wrapper itself" do
+      yielded = nil
+      @wrapper = Ractor::Wrapper.new(remote) { |config| yielded = config }
+      assert_instance_of(Ractor::Wrapper::Configuration, yielded)
+      refute_equal(@wrapper, yielded)
+    end
+
+    it "can set name in the block" do
+      @wrapper = Ractor::Wrapper.new(remote) { |config| config.name = "myname" }
+      assert_equal("myname", @wrapper.name)
+    end
+
+    it "can set threads in the block" do
+      @wrapper = Ractor::Wrapper.new(remote) { |config| config.threads = 2 }
+      assert_equal(2, @wrapper.threads)
+    end
+
+    it "can set use_current_ractor in the block" do
+      @wrapper = Ractor::Wrapper.new(remote) { |config| config.use_current_ractor = true }
+      assert(@wrapper.use_current_ractor?)
+    end
+
+    it "block settings override kwargs" do
+      @wrapper = Ractor::Wrapper.new(remote, threads: 2) { |config| config.threads = 0 }
+      assert_equal(0, @wrapper.threads)
+    end
+
+    it "block can call configure_method" do
+      @wrapper = Ractor::Wrapper.new(remote) { |config| config.configure_method(move_arguments: true) }
+      str = "hello".dup
+      @wrapper.call(:echo_args, str)
+      assert_raises(Ractor::MovedError) { str.to_s }
+    end
+  end
+
   wrapper_types = [
     {
       desc: "an isolated wrapper",
