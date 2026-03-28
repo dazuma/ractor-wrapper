@@ -1,45 +1,68 @@
 # frozen_string_literal: true
 
 require "helper"
+require "timeout"
 
 describe ::Ractor::Wrapper do
   let(:remote) { RemoteObject.new }
+
+  describe "error classes" do
+    it "Error is a subclass of Ractor::Error" do
+      assert(::Ractor::Wrapper::Error < ::Ractor::Error)
+    end
+
+    it "CrashedError is a subclass of Error" do
+      assert(::Ractor::Wrapper::CrashedError < ::Ractor::Wrapper::Error)
+    end
+
+    it "StoppedError is a subclass of Error" do
+      assert(::Ractor::Wrapper::StoppedError < ::Ractor::Wrapper::Error)
+    end
+
+    it "CrashedError can be rescued as Ractor::Wrapper::Error" do
+      assert_raises(::Ractor::Wrapper::Error) { raise ::Ractor::Wrapper::CrashedError, "test" }
+    end
+
+    it "StoppedError can be rescued as Ractor::Wrapper::Error" do
+      assert_raises(::Ractor::Wrapper::Error) { raise ::Ractor::Wrapper::StoppedError, "test" }
+    end
+  end
 
   describe "initialization block" do
     after { @wrapper&.async_stop&.join }
 
     it "yields a Configuration, not the Wrapper itself" do
       yielded = nil
-      @wrapper = Ractor::Wrapper.new(remote) { |config| yielded = config }
-      assert_instance_of(Ractor::Wrapper::Configuration, yielded)
+      @wrapper = ::Ractor::Wrapper.new(remote) { |config| yielded = config }
+      assert_instance_of(::Ractor::Wrapper::Configuration, yielded)
       refute_equal(@wrapper, yielded)
     end
 
     it "can set name in the block" do
-      @wrapper = Ractor::Wrapper.new(remote) { |config| config.name = "myname" }
+      @wrapper = ::Ractor::Wrapper.new(remote) { |config| config.name = "myname" }
       assert_equal("myname", @wrapper.name)
     end
 
     it "can set threads in the block" do
-      @wrapper = Ractor::Wrapper.new(remote) { |config| config.threads = 2 }
+      @wrapper = ::Ractor::Wrapper.new(remote) { |config| config.threads = 2 }
       assert_equal(2, @wrapper.threads)
     end
 
     it "can set use_current_ractor in the block" do
-      @wrapper = Ractor::Wrapper.new(remote) { |config| config.use_current_ractor = true }
+      @wrapper = ::Ractor::Wrapper.new(remote) { |config| config.use_current_ractor = true }
       assert(@wrapper.use_current_ractor?)
     end
 
     it "block settings override kwargs" do
-      @wrapper = Ractor::Wrapper.new(remote, threads: 2) { |config| config.threads = 0 }
+      @wrapper = ::Ractor::Wrapper.new(remote, threads: 2) { |config| config.threads = 0 }
       assert_equal(0, @wrapper.threads)
     end
 
     it "block can call configure_method" do
-      @wrapper = Ractor::Wrapper.new(remote) { |config| config.configure_method(move_arguments: true) }
+      @wrapper = ::Ractor::Wrapper.new(remote) { |config| config.configure_method(move_arguments: true) }
       str = "hello".dup
       @wrapper.call(:echo_args, str)
-      assert_raises(Ractor::MovedError) { str.to_s }
+      assert_raises(::Ractor::MovedError) { str.to_s }
     end
   end
 
@@ -67,13 +90,13 @@ describe ::Ractor::Wrapper do
   threading_types.each do |config|
     describe "an isolated wrapper running #{config[:desc]}" do
       let(:base_opts) { config[:opts] }
-      let(:wrapper) { Ractor::Wrapper.new(remote, **base_opts) }
+      let(:wrapper) { ::Ractor::Wrapper.new(remote, **base_opts) }
 
       after { wrapper.async_stop.join }
 
       it "moves a wrapped object" do
         wrapper
-        assert_raises(Ractor::MovedError) do
+        assert_raises(::Ractor::MovedError) do
           remote.echo_args
         end
       end
@@ -81,7 +104,7 @@ describe ::Ractor::Wrapper do
       it "recovers the object" do
         assert_equal("[], {}", remote.echo_args)
         wrapper
-        assert_raises(Ractor::MovedError) do
+        assert_raises(::Ractor::MovedError) do
           remote.echo_args
         end
         wrapper.async_stop
@@ -92,7 +115,7 @@ describe ::Ractor::Wrapper do
 
     describe "a local wrapper" do
       let(:base_opts) { config[:opts] }
-      let(:wrapper) { Ractor::Wrapper.new(remote, **base_opts, use_current_ractor: true) }
+      let(:wrapper) { ::Ractor::Wrapper.new(remote, **base_opts, use_current_ractor: true) }
 
       after { wrapper.async_stop.join }
 
@@ -103,7 +126,7 @@ describe ::Ractor::Wrapper do
 
       it "refuses to recover" do
         wrapper.async_stop
-        error = assert_raises(Ractor::Error) do
+        error = assert_raises(::Ractor::Error) do
           wrapper.recover_object
         end
         assert_equal("cannot recover an object from a local wrapper", error.message)
@@ -119,19 +142,19 @@ describe ::Ractor::Wrapper do
       after { @wrapper&.async_stop&.join }
 
       it "refuses to wrap a moved object" do
-        port = Ractor::Port.new
+        port = ::Ractor::Port.new
         port.send(remote, move: true)
         port.receive
         port.close
-        error = assert_raises(Ractor::MovedError) do
-          Ractor::Wrapper.new(remote, **base_opts)
+        error = assert_raises(::Ractor::MovedError) do
+          ::Ractor::Wrapper.new(remote, **base_opts)
         end
         assert_equal("cannot wrap a moved object", error.message)
       end
 
       it "is shareable" do
-        @wrapper = Ractor::Wrapper.new(remote, **base_opts)
-        assert(Ractor.shareable?(@wrapper))
+        @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+        assert(::Ractor.shareable?(@wrapper))
       end
     end
 
@@ -139,7 +162,7 @@ describe ::Ractor::Wrapper do
       let(:base_opts) { config1[:opts].merge(config2[:opts]) }
 
       def wrapper(**)
-        @wrapper ||= Ractor::Wrapper.new(remote, **base_opts, **)
+        @wrapper ||= ::Ractor::Wrapper.new(remote, **base_opts, **)
       end
 
       after { wrapper.async_stop.join }
@@ -150,7 +173,7 @@ describe ::Ractor::Wrapper do
       end
 
       it "gets exceptions" do
-        exception = assert_raises(RuntimeError) do
+        exception = assert_raises(::RuntimeError) do
           wrapper.call(:whoops)
         end
         assert_equal("Whoops", exception.message)
@@ -179,7 +202,7 @@ describe ::Ractor::Wrapper do
       let(:base_opts) { config1[:opts].merge(config2[:opts]) }
 
       def wrapper(**)
-        @wrapper ||= Ractor::Wrapper.new(remote, **base_opts, **)
+        @wrapper ||= ::Ractor::Wrapper.new(remote, **base_opts, **)
       end
 
       after { wrapper.async_stop.join }
@@ -194,14 +217,14 @@ describe ::Ractor::Wrapper do
         wrapper(move_arguments: true)
         str = "hello".dup
         wrapper.call(:echo_args, str)
-        assert_raises(Ractor::MovedError) { str.to_s }
+        assert_raises(::Ractor::MovedError) { str.to_s }
       end
 
       it "moves arguments when move_data is set to true" do
         wrapper(move_data: true)
         str = "hello".dup
         wrapper.call(:echo_args, str)
-        assert_raises(Ractor::MovedError) { str.to_s }
+        assert_raises(::Ractor::MovedError) { str.to_s }
       end
 
       it "honors move_arguments over move_data" do
@@ -302,9 +325,21 @@ describe ::Ractor::Wrapper do
       end
     end
 
+    describe "stopping behavior of #{config1[:desc]} running #{config2[:desc]}" do
+      let(:base_opts) { config1[:opts].merge(config2[:opts]) }
+      let(:wrapper) { ::Ractor::Wrapper.new(remote, **base_opts) }
+
+      after { wrapper.async_stop.join }
+
+      it "raises StoppedError when called after the wrapper has stopped" do
+        wrapper.async_stop.join
+        assert_raises(::Ractor::Wrapper::StoppedError) { wrapper.call(:echo_args) }
+      end
+    end
+
     describe "stubs in #{config1[:desc]} running #{config2[:desc]}" do
       let(:base_opts) { config1[:opts].merge(config2[:opts]) }
-      let(:wrapper) { Ractor::Wrapper.new(remote, **base_opts) }
+      let(:wrapper) { ::Ractor::Wrapper.new(remote, **base_opts) }
 
       after { wrapper.async_stop.join }
 
@@ -314,7 +349,7 @@ describe ::Ractor::Wrapper do
       end
 
       it "converts exceptions" do
-        exception = assert_raises(RuntimeError) do
+        exception = assert_raises(::RuntimeError) do
           wrapper.stub.whoops
         end
         assert_equal("Whoops", exception.message)
@@ -330,18 +365,36 @@ describe ::Ractor::Wrapper do
   wrapper_types.each do |config|
     describe "non-threaded lifecycle in #{config[:desc]}" do
       let(:base_opts) { config[:opts] }
-      let(:wrapper) { Ractor::Wrapper.new(remote, **base_opts) }
+      let(:wrapper) { ::Ractor::Wrapper.new(remote, **base_opts) }
 
       after { wrapper.async_stop.join }
 
-      it "serializes long-running methods" do
-        r1 = Ractor.new(wrapper) do |w|
-          result = w.call(:slow_echo, "hello")
-          [result, Time.now.to_f]
+      it "raises StoppedError when a call is refused during shutdown" do
+        ::Timeout.timeout(5) do
+          # Start a slow call so the server is occupied, then queue stop + another call.
+          # When the slow call finishes, server processes the stop, and cleanup refusees
+          # the queued call via refuse_method.
+          slow_thread = ::Thread.new { wrapper.call(:slow_echo, "fill") rescue nil }
+          sleep 0.1 # ensure slow call is being processed
+          wrapper.async_stop
+          result = begin
+            wrapper.call(:echo_args)
+          rescue ::StandardError => e
+            e
+          end
+          slow_thread.join
+          assert_instance_of(::Ractor::Wrapper::StoppedError, result)
         end
-        r2 = Ractor.new(wrapper) do |w|
+      end
+
+      it "serializes long-running methods" do
+        r1 = ::Ractor.new(wrapper) do |w|
+          result = w.call(:slow_echo, "hello")
+          [result, ::Time.now.to_f]
+        end
+        r2 = ::Ractor.new(wrapper) do |w|
           result = w.call(:slow_echo, "world")
-          [result, Time.now.to_f]
+          [result, ::Time.now.to_f]
         end
         result1, time1 = r1.value
         result2, time2 = r2.value
@@ -353,25 +406,128 @@ describe ::Ractor::Wrapper do
 
     describe "2-thread lifecycle in #{config[:desc]}" do
       let(:base_opts) { config[:opts] }
-      let(:wrapper) { Ractor::Wrapper.new(remote, **base_opts, threads: 2) }
+      let(:wrapper) { ::Ractor::Wrapper.new(remote, **base_opts, threads: 2) }
 
       after { wrapper.async_stop.join }
 
       it "parallelizes long-running methods" do
         wrapper.call(:echo_args, 1)
-        r1 = Ractor.new(wrapper) do |w|
+        r1 = ::Ractor.new(wrapper) do |w|
           result = w.call(:slow_echo, "hello")
-          [result, Time.now.to_f]
+          [result, ::Time.now.to_f]
         end
-        r2 = Ractor.new(wrapper) do |w|
+        r2 = ::Ractor.new(wrapper) do |w|
           result = w.call(:slow_echo, "world")
-          [result, Time.now.to_f]
+          [result, ::Time.now.to_f]
         end
         result1, time1 = r1.value
         result2, time2 = r2.value
         assert_equal("hello", result1)
         assert_equal("world", result2)
         assert_operator((time1 - time2).abs, :<, 0.8)
+      end
+    end
+  end
+
+  describe "after unexpected server termination" do
+    # Force a server crash by sending a CrashingJoinMessage (defined in
+    # helper.rb) to the server port. main_loop accesses reply_port on the
+    # received message, which raises, propagating out of main_loop and
+    # triggering the ensure-based crash cleanup.
+    def crash_server(wrapper)
+      wrapper.instance_variable_get(:@port).send(
+        CrashingJoinMessage.new(reply_port: nil),
+        move: true
+      )
+    end
+
+    [
+      {desc: "isolated threaded wrapper", opts: {threads: 1, enable_logging: true}},
+      {desc: "local threaded wrapper", opts: {use_current_ractor: true, threads: 1}},
+    ].each do |config|
+      describe config[:desc] do
+        it "notifies callers queued but not yet dispatched to a worker when the server crashes" do
+          ::Timeout.timeout(5) do
+            capture_subprocess_io do
+              wrapper = ::Ractor::Wrapper.new(remote, **config[:opts])
+              t1 = ::Thread.new { wrapper.call(:slow_echo, "first") rescue $! } # rubocop:disable Style/SpecialGlobalVars
+              sleep 0.1 # let the single worker pick up the first call
+              t2 = ::Thread.new { wrapper.call(:slow_echo, "second") rescue $! } # rubocop:disable Style/SpecialGlobalVars
+              sleep 0.1 # let the second call reach the queue
+              crash_server(wrapper)
+              result1 = t1.value
+              result2 = t2.value
+              # Call 1 was already dispatched to the worker, which finishes and replies normally
+              assert_equal("first", result1)
+              # Call 2 was queued but not dispatched; crash cleanup should notify it
+              assert_instance_of(::Ractor::Wrapper::CrashedError, result2)
+            end
+          end
+        end
+      end
+    end
+
+    [
+      {desc: "isolated sequential wrapper", opts: {}},
+      {desc: "isolated threaded wrapper", opts: {threads: 2}},
+      {desc: "local sequential wrapper", opts: {use_current_ractor: true}},
+      {desc: "local threaded wrapper", opts: {use_current_ractor: true, threads: 2}},
+    ].each do |config|
+      describe config[:desc] do
+        it "does not hang when the server crashes with a join pending" do
+          ::Timeout.timeout(5) do
+            capture_subprocess_io do
+              wrapper = ::Ractor::Wrapper.new(remote, **config[:opts])
+              join_thread = ::Thread.new { wrapper.join }
+              sleep 0.1  # let the join request reach and be queued by the server
+              crash_server(wrapper)
+              assert join_thread.join(5), "join should complete within 5 seconds"
+              assert_same(wrapper, join_thread.value)
+            end
+          end
+        end
+
+        it "does not hang when join called after the server has already crashed" do
+          ::Timeout.timeout(5) do
+            capture_subprocess_io do
+              wrapper = ::Ractor::Wrapper.new(remote, **config[:opts])
+              crash_server(wrapper)
+              sleep 0.1  # let crash cleanup finish and close the port
+              assert_same(wrapper, wrapper.join)
+            end
+          end
+        end
+
+        it "raises StoppedError if a call is made post-crash" do
+          ::Timeout.timeout(5) do
+            capture_subprocess_io do
+              wrapper = ::Ractor::Wrapper.new(remote, **config[:opts])
+              crash_server(wrapper)
+              sleep 0.1  # let crash cleanup finish and close the port
+              assert_raises(::Ractor::Wrapper::StoppedError) do
+                wrapper.call(:echo_args)
+              end
+            end
+          end
+        end
+      end
+    end
+
+    [
+      {desc: "isolated sequential wrapper", opts: {}},
+      {desc: "isolated threaded wrapper", opts: {threads: 2}},
+    ].each do |config|
+      describe config[:desc] do
+        it "recovers the object" do
+          ::Timeout.timeout(5) do
+            capture_subprocess_io do
+              wrapper = ::Ractor::Wrapper.new(remote, **config[:opts])
+              crash_server(wrapper)
+              recovered = wrapper.recover_object
+              assert_equal("[], {}", recovered.echo_args)
+            end
+          end
+        end
       end
     end
   end

@@ -147,7 +147,7 @@ Metrics/CollectionLiteralLength:
 Metrics/CyclomaticComplexity:
   Max: 10
 Metrics/MethodLength:
-  Max: 30
+  Max: 35
 Metrics/ModuleLength:
   Max: 500
 Metrics/ParameterLists:
@@ -334,6 +334,9 @@ Style/RedundantSelfAssignmentBranch:
   Enabled: true
 Style/RedundantStringEscape:
   Enabled: true
+Style/RescueModifier:
+  Exclude:
+    - "test/**/*"
 Style/ReturnNilInPredicateMethodDefinition:
   Enabled: false
 Style/SafeNavigationChainLength:
