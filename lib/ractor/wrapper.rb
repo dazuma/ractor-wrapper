@@ -174,6 +174,22 @@ class Ractor
   #
   class Wrapper
     ##
+    # Base class for errors raised by {Ractor::Wrapper}.
+    #
+    class Error < ::Ractor::Error; end
+
+    ##
+    # Raised when a {Ractor::Wrapper} server has crashed unexpectedly.
+    #
+    class CrashedError < Error; end
+
+    ##
+    # Raised when calling a method on a {Ractor::Wrapper} whose server has
+    # stopped and is no longer accepting calls.
+    #
+    class StoppedError < Error; end
+
+    ##
     # A stub that forwards calls to a wrapper.
     #
     # This object is shareable and can be passed to any Ractor.
@@ -578,7 +594,11 @@ class Ractor
                                 settings: settings,
                                 reply_port: reply_port)
       maybe_log("Sending method", method_name: method_name, transaction: transaction)
-      @port.send(message, move: settings.move_arguments?)
+      begin
+        @port.send(message, move: settings.move_arguments?)
+      rescue ::Ractor::ClosedError
+        raise StoppedError, "Wrapper has stopped"
+      end
       loop do
         reply_message = reply_port.receive
         case reply_message
@@ -586,14 +606,14 @@ class Ractor
           handle_yield(reply_message, transaction, settings, method_name, &)
         when ReturnMessage
           maybe_log("Received result", method_name: method_name, transaction: transaction)
-          reply_port.close
           return reply_message.value
         when ExceptionMessage
           maybe_log("Received exception", method_name: method_name, transaction: transaction)
-          reply_port.close
           raise reply_message.exception
         end
       end
+    ensure
+      reply_port.close
     end
 
     ##
@@ -617,6 +637,10 @@ class Ractor
     ##
     # Blocks until the wrapper has fully stopped.
     #
+    # Unlike `Thread#join` and `Ractor#join`, if a Wrapper crashes, the
+    # exception generally does *not* get raised out of `Wrapper#join`. Instead,
+    # it just returns self in the same way as normal termination.
+    #
     # @return [self]
     #
     def join
@@ -624,12 +648,15 @@ class Ractor
         @ractor.join
       else
         reply_port = ::Ractor::Port.new
-        @port.send(JoinMessage.new(reply_port))
-        reply_port.receive
-        reply_port.close
+        begin
+          @port.send(JoinMessage.new(reply_port))
+          reply_port.receive
+        rescue ::Ractor::ClosedError
+          # Assume the wrapper has stopped if the port is not sendable
+        ensure
+          reply_port.close
+        end
       end
-      self
-    rescue ::Ractor::ClosedError
       self
     end
 
@@ -688,6 +715,12 @@ class Ractor
 
     ##
     # @private
+    # Message sent from a server in response to a join request.
+    #
+    JoinReplyMessage = ::Data.define
+
+    ##
+    # @private
     # Message sent to report a return value
     #
     ReturnMessage = ::Data.define(:value)
@@ -714,7 +747,9 @@ class Ractor
       maybe_log("Starting local server")
       @ractor = nil
       @port = ::Ractor::Port.new
+      wrapper_id = object_id
       ::Thread.new do
+        ::Thread.current.name = "ractor-wrapper:server:#{wrapper_id}"
         Server.run_local(object: object,
                          port: @port,
                          name: name,
@@ -834,8 +869,7 @@ class Ractor
         @port = port
         @name = name
         @enable_logging = enable_logging
-        @threading_enabled = threads.positive?
-        @active_workers = threads
+        @threads_requested = threads.positive? ? threads : false
         @join_requests = []
       end
 
@@ -847,14 +881,16 @@ class Ractor
       #
       def run
         receive_remote_object if @isolated
-        start_workers if @threading_enabled
+        start_workers if @threads_requested
         main_loop
-        stop_workers if @threading_enabled
+        stop_workers if @threads_requested
         cleanup
         @object
-      rescue ::StandardError => e
-        maybe_log("Unexpected error: #{e.inspect}")
+      rescue ::Exception => e # rubocop:disable Lint/RescueException
+        @crash_exception = e
         @object
+      ensure
+        crash_cleanup if @crash_exception
       end
 
       private
@@ -873,10 +909,11 @@ class Ractor
       # shared queue. Called only if worker threading is enabled.
       #
       def start_workers
+        maybe_log("Spawning #{@threads_requested} worker threads")
         @queue = ::Queue.new
-        maybe_log("Spawning #{@active_workers} worker threads")
-        (1..@active_workers).map do |worker_num|
-          ::Thread.new { worker_thread(worker_num) }
+        @active_workers = {}
+        (1..@threads_requested).each do |worker_num|
+          @active_workers[worker_num] = ::Thread.new { worker_thread(worker_num) }
         end
       end
 
@@ -902,14 +939,14 @@ class Ractor
           case message
           when CallMessage
             maybe_log("Received CallMessage", call_message: message)
-            if @threading_enabled
+            if @threads_requested
               @queue.enq(message)
             else
               handle_method(message)
             end
           when WorkerStoppedMessage
             maybe_log("Received unexpected WorkerStoppedMessage")
-            @active_workers -= 1 if @threading_enabled
+            @active_workers.delete(message.worker_num) if @threads_requested
             break
           when StopMessage
             maybe_log("Received stop")
@@ -944,7 +981,7 @@ class Ractor
       #
       def stop_workers
         @queue.close
-        while @active_workers.positive?
+        until @active_workers.empty?
           maybe_log("Waiting for message in stopping phase")
           message = @port.receive
           case message
@@ -952,7 +989,7 @@ class Ractor
             refuse_method(message)
           when WorkerStoppedMessage
             maybe_log("Acknowledged WorkerStoppedMessage: #{message.worker_num}")
-            @active_workers -= 1
+            @active_workers.delete(message.worker_num)
           when StopMessage
             maybe_log("Stop received when already stopping")
           when JoinMessage
@@ -969,8 +1006,6 @@ class Ractor
       def cleanup
         maybe_log("Closing inbox")
         @port.close
-        maybe_log("Responding to join requests")
-        @join_requests.each { |port| send_join_reply(port) }
         maybe_log("Draining inbox")
         loop do
           message = begin
@@ -991,6 +1026,94 @@ class Ractor
             maybe_log("Received and responding immediately to join request")
             send_join_reply(message.reply_port)
           end
+        end
+        maybe_log("Responding to join requests")
+        @join_requests.each { |port| send_join_reply(port) }
+      end
+
+      ##
+      # Called from the ensure block in run when an unexpected exception
+      # terminated the server. Drains pending requests that are not otherwise
+      # being handled, responding to all pending callers and join requesters,
+      # and also joins any worker threads.
+      #
+      def crash_cleanup
+        maybe_log("Running crash cleanup after: #{@crash_exception.message} (#{@crash_exception.class})")
+        error = CrashedError.new("Server crashed: #{@crash_exception.message} (#{@crash_exception.class})")
+        # `@queue` should not be nil in threaded mode, but we're checking
+        # anyway just in case a crash happened during setup
+        drain_queue_after_crash(@queue, error) if @threads_requested && @queue
+        drain_inbox_after_crash(@port, error)
+        # `@active_workers` should not be nil in threaded mode, but we're
+        # checking anyway just in case a crash happened during setup
+        join_workers_after_crash(@active_workers) if @threads_requested && @active_workers
+        @join_requests.each { |port| send_join_reply(port) }
+      rescue ::Exception => e # rubocop:disable Lint/RescueException
+        maybe_log("Suppressed exception during crash_cleanup: #{e.message} (#{e.class})")
+      end
+
+      ##
+      # Drains any remaining queued call messages after a crash, sending errors
+      # to callers whose calls had not yet been dispatched to a worker thread.
+      #
+      def drain_queue_after_crash(queue, error)
+        queue.close
+        loop do
+          message = queue.deq
+          break if message.nil?
+          begin
+            message.reply_port.send(ExceptionMessage.new(error))
+          rescue ::Ractor::Error
+            maybe_log("Failed to send crash error to queued caller", call_message: message)
+          end
+        end
+      rescue ::Exception => e # rubocop:disable Lint/RescueException
+        maybe_log("Suppressed exception during drain_queue_after_crash: " \
+                  "#{e.message} (#{e.class})")
+      end
+
+      ##
+      # Drains any remaining inbox messages after a crash, sending errors to
+      # pending callers and responding to any join requests.
+      #
+      def drain_inbox_after_crash(port, error)
+        begin
+          port.close
+        rescue ::Ractor::Error
+          # Port was already closed (maybe because it was the cause of the crash)
+        end
+        loop do
+          message = begin
+            port.receive
+          rescue ::Ractor::Error
+            nil
+          end
+          break if message.nil?
+          case message
+          when CallMessage
+            begin
+              message.reply_port.send(ExceptionMessage.new(error))
+            rescue ::Ractor::Error
+              maybe_log("Failed to send crash error to caller", call_message: message)
+            end
+          when JoinMessage
+            send_join_reply(message.reply_port)
+          when WorkerStoppedMessage, StopMessage
+            # Ignore
+          end
+        end
+      rescue ::Exception => e # rubocop:disable Lint/RescueException
+        maybe_log("Suppressed exception during drain_inbox_after_crash: #{e.message} (#{e.class})")
+      end
+
+      ##
+      # Wait until all workers have stopped after a crash
+      #
+      def join_workers_after_crash(workers)
+        workers.each_value do |thread|
+          thread.join
+        rescue ::Exception => e # rubocop:disable Lint/RescueException
+          maybe_log("Suppressed exception during join_workers_after_crash: #{e.message} (#{e.class})")
         end
       end
 
@@ -1015,7 +1138,7 @@ class Ractor
         begin
           @port.send(WorkerStoppedMessage.new(worker_num))
         rescue ::Ractor::ClosedError
-          maybe_log("Orphaned worker thread", worker_num: worker_num)
+          maybe_log("Worker unable to report stop, possibly due to server crash", worker_num: worker_num)
         end
       end
 
@@ -1031,20 +1154,18 @@ class Ractor
       def handle_method(message, worker_num: nil)
         block = make_block(message)
         maybe_log("Running method", worker_num: worker_num, call_message: message)
+        result = @object.__send__(message.method_name, *message.args, **message.kwargs, &block)
+        maybe_log("Sending return value", worker_num: worker_num, call_message: message)
+        message.reply_port.send(ReturnMessage.new(result), move: message.settings.move_results?)
+      rescue ::Exception => e # rubocop:disable Lint/RescueException
+        maybe_log("Sending exception", worker_num: worker_num, call_message: message)
         begin
-          result = @object.__send__(message.method_name, *message.args, **message.kwargs, &block)
-          maybe_log("Sending return value", worker_num: worker_num, call_message: message)
-          message.reply_port.send(ReturnMessage.new(result), move: message.settings.move_results?)
-        rescue ::Exception => e # rubocop:disable Lint/RescueException
-          maybe_log("Sending exception", worker_num: worker_num, call_message: message)
+          message.reply_port.send(ExceptionMessage.new(e))
+        rescue ::Exception # rubocop:disable Lint/RescueException
           begin
-            message.reply_port.send(ExceptionMessage.new(e))
-          rescue ::StandardError
-            begin
-              message.reply_port.send(ExceptionMessage.new(::StandardError.new(e.inspect)))
-            rescue ::StandardError
-              maybe_log("Failure to send method response", worker_num: worker_num, call_message: message)
-            end
+            message.reply_port.send(ExceptionMessage.new(::RuntimeError.new(e.inspect)))
+          rescue ::Exception # rubocop:disable Lint/RescueException
+            maybe_log("Failure to send method response", worker_num: worker_num, call_message: message)
           end
         end
       end
@@ -1063,10 +1184,13 @@ class Ractor
         return message.block_arg unless message.block_arg == :send_block_message
         proc do |*args, **kwargs|
           reply_port = ::Ractor::Port.new
-          yield_message = YieldMessage.new(args: args, kwargs: kwargs, reply_port: reply_port)
-          message.reply_port.send(yield_message, move: message.settings.move_block_arguments?)
-          reply_message = reply_port.receive
-          reply_port.close
+          reply_message = begin
+            yield_message = YieldMessage.new(args: args, kwargs: kwargs, reply_port: reply_port)
+            message.reply_port.send(yield_message, move: message.settings.move_block_arguments?)
+            reply_port.receive
+          ensure
+            reply_port.close
+          end
           case reply_message
           when ExceptionMessage
             raise reply_message.exception
@@ -1084,7 +1208,7 @@ class Ractor
       def refuse_method(message)
         maybe_log("Refusing method call", call_message: message)
         begin
-          error = ::Ractor::ClosedError.new("Wrapper is shutting down")
+          error = StoppedError.new("Wrapper is shutting down")
           message.reply_port.send(ExceptionMessage.new(error))
         rescue ::Ractor::Error
           maybe_log("Failed to send refusal message", call_message: message)
@@ -1095,7 +1219,7 @@ class Ractor
       # This attempts to send a signal that a wrapper join has completed.
       #
       def send_join_reply(port)
-        port.send(nil)
+        port.send(JoinReplyMessage.new.freeze)
       rescue ::Ractor::ClosedError
         maybe_log("Join reply port is closed")
       end
@@ -1107,13 +1231,15 @@ class Ractor
         return unless @enable_logging
         transaction ||= call_message&.transaction
         method_name ||= call_message&.method_name
-        metadata = [::Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.%L"), "Ractor::Wrapper/#{@name}"]
-        metadata << "Worker/#{worker_num}" if worker_num
-        metadata << "Transaction/#{transaction}" if transaction
-        metadata << "Method/#{method_name}" if method_name
+        metadata = [::Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.%L"), "Ractor::Wrapper:#{@name}"]
+        metadata << "Worker:#{worker_num}" if worker_num
+        metadata << "Transaction:#{transaction}" if transaction
+        metadata << "Method:#{method_name}" if method_name
         metadata = metadata.join(" ")
         $stderr.puts("[#{metadata}] #{str}")
         $stderr.flush
+      rescue ::StandardError
+        # Swallow any errors during logging
       end
     end
   end
