@@ -1,5 +1,23 @@
 # Release History
 
+### v0.4.0 / 2026-03-30
+
+* BREAKING CHANGE: Raises `Ractor::Wrapper::StoppedError` instead of `Ractor::ClosedError` if a method is called via the wrapper after the wrapper has stopped
+* BREAKING CHANGE: `Wrapper#join` now returns normally rather than raising, if an isolated wrapper terminated due to a crash
+* BREAKING CHANGE: Method configuration interface now uses symbolic settings values instead of booleans for more flexibility
+* ADDED: Use a separate Ractor::Wrapper::Configuration class for block-based initialization
+* ADDED: Method configuration interface now uses symbolic settings values instead of booleans for more flexibility
+* ADDED: Support for suppressing return values for methods and blocks that unintentionally return something they shouldn't
+* FIXED: Raises `Ractor::Wrapper::StoppedError` instead of `Ractor::ClosedError` if a method is called via the wrapper after the wrapper has stopped
+* FIXED: Method calls raise `Ractor::Wrapper::CrashedError` instead of hanging if the wrapper crashes during handling
+* FIXED: `Wrapper#join` no longer hangs if a local wrapper crashes, but returns to indicate that the wrapper has stopped (albeit non-normally)
+* FIXED: `Wrapper#join` now returns normally rather than raising, if an isolated wrapper terminated due to a crash
+* FIXED: Internal cleanup is more robust if a crash occurs in the wrapper
+* FIXED: Prevented port leaks if a method call send or a block yield send fails
+* FIXED: Methods that return or yield self return/yield the stub instead
+* FIXED: The recover_object method now raises Ractor::Wrapper::Error if recovery failed
+* DOCS: Updates to README
+
 ### v0.3.0 / 2026-01-05
 
 This is a major update, and the library, while still experimental, is finally somewhat usable. The examples in the README now actually work!
