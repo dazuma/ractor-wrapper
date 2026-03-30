@@ -273,47 +273,70 @@ class Ractor
       end
 
       ##
-      # Configure the move semantics for the given method (or the default
-      # settings if no method name is given.) That is, determine whether
-      # arguments, return values, and/or exceptions are copied or moved when
-      # communicated with the wrapper. By default, all objects are copied.
+      # Configure how argument and return values are communicated for the given
+      # method.
       #
-      # @param method_name [Symbol, nil] The name of the method being configured,
+      # In general, the following values are recognized for the data-moving
+      # settings:
+      #
+      # * `:copy` - Method arguments or return values that are not shareable,
+      #   are *deep copied* when communicated between the caller and the object.
+      # * `:move` - Method arguments or return values that are not shareable,
+      #   are *moved* when communicated between the caller and the object. This
+      #   means they are no longer available to the source; that is, the caller
+      #   can no longer access objects that were moved to method arguments, and
+      #   the wrapped object can no longer access objects that were used as
+      #   return values.
+      # * `:void` - This option is available for return values and block
+      #   results. It disables return values for the given method, and is
+      #   intended to avoid copying or moving objects that are not intended to
+      #   be return values. The recipient will receive `nil`.
+      #
+      # The following settings are recognized for the `block_environment`
+      # setting:
+      #
+      # * `:caller` - Blocks are executed in the caller's context. This means
+      #   the wrapper sends a message back to the caller to execute the block
+      #   in its original context. This means the block will have access to its
+      #   lexical scope and any other data available to the calling Ractor.
+      # * `:wrapped` - Blocks are executed directly in the wrapped object's
+      #   context. This does not require any communication, but it means the
+      #   block is removed from the caller's environment and does not have
+      #   access to the caller's lexical scope or Ractor-accessible data.
+      #
+      # All settings are optional. If not provided, they will fall back to a
+      # default. If you are configuring a particular method, by specifying the
+      # `method_name` argument, any unspecified setting will fall back to the
+      # method default settings (which you can set by omitting the method name.)
+      # If you are configuring the method default settings, by omitting the
+      # `method_name` argument, unspecified settings will fall back to `:copy`
+      # for the data movement settings, and `:caller` for the
+      # `block_environment` setting.
+      #
+      # @param method_name [Symbol,nil] The name of the method being configured,
       #     or `nil` to set defaults for all methods not configured explicitly.
-      # @param move_data [boolean] If true, communication for this method will
-      #     move instead of copy arguments and return values. Default is false.
-      #     This setting can be overridden by other `:move_*` settings.
-      # @param move_arguments [boolean] If true, arguments for this method are
-      #     moved instead of copied. If not set, uses the `:move_data` setting.
-      # @param move_results [boolean] If true, return values for this method are
-      #     moved instead of copied. If not set, uses the `:move_data` setting.
-      # @param move_block_arguments [boolean] If true, arguments to blocks passed
-      #     to this method are moved instead of copied. If not set, uses the
-      #     `:move_data` setting.
-      # @param move_block_results [boolean] If true, result values from blocks
-      #     passed to this method are moved instead of copied. If not set, uses
-      #     the `:move_data` setting.
-      # @param execute_blocks_in_place [boolean] If true, blocks passed to this
-      #     method are made shareable and passed into the wrapper to be executed
-      #     in the wrapped environment. If false (the default), blocks are
-      #     replaced by a proc that passes messages back out to the caller and
-      #     executes the block in the caller's environment.
+      # @param arguments [:move,:copy] How to communicate method arguments.
+      # @param results [:move,:copy,:void] How to communicate method return
+      #     values.
+      # @param block_arguments [:move,:copy] How to communicate block arguments.
+      # @param block_results [:move,:copy,:void] How to communicate block
+      #     result values.
+      # @param block_environment [:caller,:wrapped] How to execute blocks, and
+      #     what scope blocks have access to.
       #
       def configure_method(method_name = nil,
-                           move_data: false,
-                           move_arguments: nil,
-                           move_results: nil,
-                           move_block_arguments: nil,
-                           move_block_results: nil,
-                           execute_blocks_in_place: nil)
+                           arguments: nil,
+                           results: nil,
+                           block_arguments: nil,
+                           block_results: nil,
+                           block_environment: nil)
         method_name = method_name.to_sym unless method_name.nil?
         @method_settings[method_name] =
-          MethodSettings.new(move_data: move_data,
-                             move_arguments: move_arguments,
-                             move_results: move_results,
-                             move_block_arguments: move_block_arguments,
-                             move_block_results: move_block_results,
-                             execute_blocks_in_place: execute_blocks_in_place)
+          MethodSettings.new(arguments: arguments,
+                             results: results,
+                             block_arguments: block_arguments,
+                             block_results: block_results,
+                             block_environment: block_environment)
         self
       end
 
@@ -351,23 +374,37 @@ class Ractor
 
       ##
       # @private
-      # Return the method settings keyed by method name. The `nil` key will
-      # contain defaults for method names not explicitly configured. This
-      # hash is a frozen snapshot and cannot be modified.
+      # Resolve the method settings by filling in the defaults for all fields
+      # not explicitly set, and return the final settings keyed by method name.
+      # The `nil` key will contain defaults for method names not explicitly
+      # configured. This hash will be frozen and shareable.
       #
       # @return [Hash{(Symbol,nil)=>MethodSettings}]
       #
-      def method_settings
-        @method_settings.dup.freeze
+      def final_method_settings
+        fallback = MethodSettings.new(arguments: :copy, results: :copy,
+                                      block_arguments: :copy, block_results: :copy,
+                                      block_environment: :caller)
+        defaults = MethodSettings.with_fallback(@method_settings[nil], fallback)
+        results = {nil => defaults}
+        @method_settings.each do |name, settings|
+          next if name.nil?
+          results[name] = MethodSettings.with_fallback(settings, defaults)
+        end
+        results.freeze
       end
 
       ##
       # @private
-      # Create an empty configuration. All settings must be set at least once
-      # before they can be read.
+      # Create an empty configuration.
       #
       def initialize
         @method_settings = {}
+        configure_method(arguments: nil,
+                         results: nil,
+                         block_arguments: nil,
+                         block_results: nil,
+                         block_environment: nil)
       end
     end
 
@@ -377,63 +414,74 @@ class Ractor
     #
     class MethodSettings
       # @private
-      def initialize(move_data: false,
-                     move_arguments: nil,
-                     move_results: nil,
-                     move_block_arguments: nil,
-                     move_block_results: nil,
-                     execute_blocks_in_place: nil)
-        @move_arguments = interpret_setting(move_arguments, move_data)
-        @move_results = interpret_setting(move_results, move_data)
-        @move_block_arguments = interpret_setting(move_block_arguments, move_data)
-        @move_block_results = interpret_setting(move_block_results, move_data)
-        @execute_blocks_in_place = interpret_setting(execute_blocks_in_place, false)
+      def initialize(arguments: nil,
+                     results: nil,
+                     block_arguments: nil,
+                     block_results: nil,
+                     block_environment: nil)
+        unless [nil, :copy, :move].include?(arguments)
+          raise ::ArgumentError, "Unknown `arguments`: #{arguments.inspect} (must be :copy or :move)"
+        end
+        unless [nil, :copy, :move, :void].include?(results)
+          raise ::ArgumentError, "Unknown `results`: #{results.inspect} (must be :copy, :move, or :void)"
+        end
+        unless [nil, :copy, :move].include?(block_arguments)
+          raise ::ArgumentError, "Unknown `block_arguments`: #{block_arguments.inspect} (must be :copy or :move)"
+        end
+        unless [nil, :copy, :move, :void].include?(block_results)
+          raise ::ArgumentError, "Unknown `block_results`: #{block_results.inspect} (must be :copy, :move, or :void)"
+        end
+        unless [nil, :caller, :wrapped].include?(block_environment)
+          raise ::ArgumentError,
+                "Unknown `block_environment`: #{block_environment.inspect} (must be :caller or :wrapped)"
+        end
+        @arguments = arguments
+        @results = results
+        @block_arguments = block_arguments
+        @block_results = block_results
+        @block_environment = block_environment
         freeze
       end
 
       ##
-      # @return [Boolean] Whether to move arguments
+      # @return [:copy,:move] How to communicate method arguments
+      # @return [nil] if not set (will not happen in final settings)
       #
-      def move_arguments?
-        @move_arguments
-      end
+      attr_reader :arguments
 
       ##
-      # @return [Boolean] Whether to move return values
+      # @return [:copy,:move,:void] How to communicate method return values
+      # @return [nil] if not set (will not happen in final settings)
       #
-      def move_results?
-        @move_results
-      end
+      attr_reader :results
 
       ##
-      # @return [Boolean] Whether to move arguments to a block
+      # @return [:copy,:move] How to communicate arguments to a block
+      # @return [nil] if not set (will not happen in final settings)
       #
-      def move_block_arguments?
-        @move_block_arguments
-      end
+      attr_reader :block_arguments
 
       ##
-      # @return [Boolean] Whether to move block results
+      # @return [:copy,:move,:void] How to communicate block results
+      # @return [nil] if not set (will not happen in final settings)
       #
-      def move_block_results?
-        @move_block_results
-      end
+      attr_reader :block_results
 
       ##
-      # @return [Boolean] Whether to call blocks in-place
+      # @return [:caller,:wrapped] What environment blocks execute in
+      # @return [nil] if not set (will not happen in final settings)
       #
-      def execute_blocks_in_place?
-        @execute_blocks_in_place
-      end
+      attr_reader :block_environment
 
-      private
-
-      def interpret_setting(setting, default)
-        if setting.nil?
-          default ? true : false
-        else
-          setting ? true : false
-        end
+      # @private
+      def self.with_fallback(settings, fallback)
+        new(
+          arguments: settings.arguments || fallback.arguments,
+          results: settings.results || fallback.results,
+          block_arguments: settings.block_arguments || fallback.block_arguments,
+          block_results: settings.block_results || fallback.block_results,
+          block_environment: settings.block_environment || fallback.block_environment
+        )
       end
     end
 
@@ -443,7 +491,10 @@ class Ractor
     # If you pass an optional block, a {Ractor::Wrapper::Configuration} object
     # will be yielded to it, allowing additional configuration before the wrapper
     # starts. In particular, per-method configuration must be set in this block.
-    # Block settings override keyword arguments when both are provided.
+    # Block-provided settings override keyword arguments.
+    #
+    # See {Configuration} for more information about the method communication
+    # and block settings.
     #
     # @param object [Object] The non-shareable object to wrap.
     # @param use_current_ractor [boolean] If true, the wrapper is run in a
@@ -452,29 +503,21 @@ class Ractor
     #     cannot be moved or must run in the main Ractor. Can also be set via
     #     the configuration block.
     # @param name [String] A name for this wrapper. Used during logging. Can
-    #     also be set via the configuration block.
+    #     also be set via the configuration block. Defaults to the object_id.
     # @param threads [Integer] The number of worker threads to run.
     #     Defaults to 0, which causes the wrapper to run sequentially without
     #     spawning workers. Can also be set via the configuration block.
-    # @param move_data [boolean] If true, all communication will by default
-    #     move instead of copy arguments and return values. Default is false.
-    #     This setting can be overridden by other `:move_*` settings.
-    # @param move_arguments [boolean] If true, all arguments will be moved
-    #     instead of copied by default. If not set, uses the `:move_data`
-    #     setting.
-    # @param move_results [boolean] If true, return values are moved instead of
-    #     copied by default. If not set, uses the `:move_data` setting.
-    # @param move_block_arguments [boolean] If true, arguments to blocks are
-    #     moved instead of copied by default. If not set, uses the `:move_data`
-    #     setting.
-    # @param move_block_results [boolean] If true, result values from blocks
-    #     are moved instead of copied by default. If not set, uses the
-    #     `:move_data` setting.
-    # @param execute_blocks_in_place [boolean] If true, blocks passed to
-    #     methods are made shareable and passed into the wrapper to be executed
-    #     in the wrapped environment. If false (the default), blocks are
-    #     replaced by a proc that passes messages back out to the caller and
-    #     executes the block in the caller's environment.
+    # @param arguments [:move,:copy] How to communicate method arguments by
+    #     default. If not specified, defaults to `:copy`.
+    # @param results [:move,:copy,:void] How to communicate method return
+    #     values by default. If not specified, defaults to `:copy`.
+    # @param block_arguments [:move,:copy] How to communicate block arguments
+    #     by default. If not specified, defaults to `:copy`.
+    # @param block_results [:move,:copy,:void] How to communicate block result
+    #     values by default. If not specified, defaults to `:copy`.
+    # @param block_environment [:caller,:wrapped] How to execute blocks, and
+    #     what scope blocks have access to. If not specified, defaults to
+    #     `:caller`.
     # @param enable_logging [boolean] Set to true to enable logging. Default
     #     is false. Can also be set via the configuration block.
     # @yield [config] An optional configuration block.
@@ -484,40 +527,37 @@ class Ractor
                    use_current_ractor: false,
                    name: nil,
                    threads: 0,
-                   move_data: false,
-                   move_arguments: nil,
-                   move_results: nil,
-                   move_block_arguments: nil,
-                   move_block_results: nil,
-                   execute_blocks_in_place: nil,
+                   arguments: nil,
+                   results: nil,
+                   block_arguments: nil,
+                   block_results: nil,
+                   block_environment: nil,
                    enable_logging: false)
       raise ::Ractor::MovedError, "cannot wrap a moved object" if ::Ractor::MovedObject === object
 
       config = Configuration.new
-      config.name = name || object_id
+      config.name = name || object_id.to_s
       config.enable_logging = enable_logging
       config.threads = threads
       config.use_current_ractor = use_current_ractor
-      config.configure_method(move_data: move_data,
-                              move_arguments: move_arguments,
-                              move_results: move_results,
-                              move_block_arguments: move_block_arguments,
-                              move_block_results: move_block_results,
-                              execute_blocks_in_place: execute_blocks_in_place)
+      config.configure_method(arguments: arguments,
+                              results: results,
+                              block_arguments: block_arguments,
+                              block_results: block_results,
+                              block_environment: block_environment)
       yield config if block_given?
 
       @name = config.name
       @enable_logging = config.enable_logging
       @threads = config.threads
-      @method_settings = config.method_settings
+      @method_settings = config.final_method_settings
+      @stub = Stub.new(self)
+
       if config.use_current_ractor
         setup_local_server(object)
       else
         setup_isolated_server(object)
       end
-      @stub = Stub.new(self)
-
-      freeze
     end
 
     ##
@@ -595,7 +635,7 @@ class Ractor
                                 reply_port: reply_port)
       maybe_log("Sending method", method_name: method_name, transaction: transaction)
       begin
-        @port.send(message, move: settings.move_arguments?)
+        @port.send(message, move: settings.arguments == :move)
       rescue ::Ractor::ClosedError
         raise StoppedError, "Wrapper has stopped"
       end
@@ -671,13 +711,17 @@ class Ractor
     # case, any calls to this method will raise Ractor::Error.
     #
     # Only one ractor may call this method; any additional calls will fail with
-    # a Ractor::Error.
+    # a Ractor::Wrapper::Error.
     #
     # @return [Object] The original wrapped object
     #
     def recover_object
-      raise ::Ractor::Error, "cannot recover an object from a local wrapper" unless @ractor
-      @ractor.value
+      raise Error, "cannot recover an object from a local wrapper" unless @ractor
+      begin
+        @ractor.value
+      rescue ::Ractor::Error => e
+        raise ::Ractor::Wrapper::Error, e.message, cause: e
+      end
     end
 
     #### private items below ####
@@ -686,7 +730,7 @@ class Ractor
     # @private
     # Message sent to initialize a server.
     #
-    InitMessage = ::Data.define(:object, :enable_logging, :threads)
+    InitMessage = ::Data.define(:object, :stub)
 
     ##
     # @private
@@ -747,10 +791,12 @@ class Ractor
       maybe_log("Starting local server")
       @ractor = nil
       @port = ::Ractor::Port.new
+      freeze
       wrapper_id = object_id
       ::Thread.new do
         ::Thread.current.name = "ractor-wrapper:server:#{wrapper_id}"
         Server.run_local(object: object,
+                         stub: @stub,
                          port: @port,
                          name: name,
                          enable_logging: enable_logging?,
@@ -771,7 +817,9 @@ class Ractor
                             threads: threads)
       end
       @port = @ractor.default_port
-      @port.send(object, move: true)
+      freeze
+      init_message = InitMessage.new(object: object, stub: @stub)
+      @port.send(init_message, move: true)
     end
 
     ##
@@ -787,7 +835,7 @@ class Ractor
     def make_block_arg(settings, &)
       if !block_given?
         nil
-      elsif settings.execute_blocks_in_place?
+      elsif settings.block_environment == :wrapped
         ::Ractor.shareable_proc(&)
       else
         :send_block_message
@@ -801,8 +849,9 @@ class Ractor
       maybe_log("Yielding to block", method_name: method_name, transaction: transaction)
       begin
         block_result = yield(*message.args, **message.kwargs)
+        block_result = nil if settings.block_results == :void
         maybe_log("Sending block result", method_name: method_name, transaction: transaction)
-        message.reply_port.send(ReturnMessage.new(block_result), move: settings.move_block_results?)
+        message.reply_port.send(ReturnMessage.new(block_result), move: settings.block_results == :move)
       rescue ::Exception => e # rubocop:disable Lint/RescueException
         maybe_log("Sending block exception", method_name: method_name, transaction: transaction)
         begin
@@ -847,8 +896,8 @@ class Ractor
       # @private
       # Create and run a server hosted in the current Ractor
       #
-      def self.run_local(object:, port:, name:, enable_logging: false, threads: 0)
-        server = new(isolated: false, object:, port:, name:, enable_logging:, threads:)
+      def self.run_local(object:, stub:, port:, name:, enable_logging: false, threads: 0)
+        server = new(isolated: false, object:, stub:, port:, name:, enable_logging:, threads:)
         server.run
       end
 
@@ -858,14 +907,15 @@ class Ractor
       #
       def self.run_isolated(name:, enable_logging: false, threads: 0)
         port = ::Ractor.current.default_port
-        server = new(isolated: true, object: nil, port:, name:, enable_logging:, threads:)
+        server = new(isolated: true, object: nil, stub: nil, port:, name:, enable_logging:, threads:)
         server.run
       end
 
       # @private
-      def initialize(isolated:, object:, port:, name:, enable_logging:, threads:)
+      def initialize(isolated:, object:, stub:, port:, name:, enable_logging:, threads:)
         @isolated = isolated
         @object = object
+        @stub = stub
         @port = port
         @name = name
         @enable_logging = enable_logging
@@ -900,8 +950,10 @@ class Ractor
       # separate Ractor.
       #
       def receive_remote_object
-        maybe_log("Waiting for remote object")
-        @object = @port.receive
+        maybe_log("Waiting for initialization")
+        init_message = @port.receive
+        @object = init_message.object
+        @stub = init_message.stub
       end
 
       ##
@@ -1155,8 +1207,10 @@ class Ractor
         block = make_block(message)
         maybe_log("Running method", worker_num: worker_num, call_message: message)
         result = @object.__send__(message.method_name, *message.args, **message.kwargs, &block)
+        result = @stub if result.equal?(@object)
+        result = nil if message.settings.results == :void
         maybe_log("Sending return value", worker_num: worker_num, call_message: message)
-        message.reply_port.send(ReturnMessage.new(result), move: message.settings.move_results?)
+        message.reply_port.send(ReturnMessage.new(result), move: message.settings.results == :move)
       rescue ::Exception => e # rubocop:disable Lint/RescueException
         maybe_log("Sending exception", worker_num: worker_num, call_message: message)
         begin
@@ -1185,8 +1239,10 @@ class Ractor
         proc do |*args, **kwargs|
           reply_port = ::Ractor::Port.new
           reply_message = begin
+            args.map! { |arg| arg.equal?(@object) ? @stub : arg }
+            kwargs.transform_values! { |arg| arg.equal?(@object) ? @stub : arg }
             yield_message = YieldMessage.new(args: args, kwargs: kwargs, reply_port: reply_port)
-            message.reply_port.send(yield_message, move: message.settings.move_block_arguments?)
+            message.reply_port.send(yield_message, move: message.settings.block_arguments == :move)
             reply_port.receive
           ensure
             reply_port.close

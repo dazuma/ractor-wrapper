@@ -44,4 +44,12 @@ class RemoteObject
     sleep(1)
     arg
   end
+
+  def return_self
+    self
+  end
+
+  def block_args_self(obj1, obj2)
+    yield(obj1, self, kwobj: obj2, kwself: self)
+  end
 end
