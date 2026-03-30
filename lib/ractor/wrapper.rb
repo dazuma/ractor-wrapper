@@ -99,7 +99,7 @@ class Ractor
   #
   #     # Create a wrapper around the database. A SQLite3::Database object
   #     # cannot be moved between Ractors, so we configure the wrapper to run
-  #     # in the current Ractor. You can also configure it to run multiple
+  #     # in the current Ractor. We can also configure it to run multiple
   #     # worker threads because the database object itself is thread-safe.
   #     wrapper = Ractor::Wrapper.new(db, use_current_ractor: true, threads: 2)
   #
@@ -112,17 +112,16 @@ class Ractor
   #     rows = wrapper.stub.execute("select * from numbers")
   #
   #     # Here, we start two Ractors, and pass the stub to each one. The
-  #     # wrapper's two worker threads will handle the requests in the order
-  #     # received.
-  #     r1 = Ractor.new(wrapper.stub) do |db_stub|
+  #     # wrapper's worker threads will handle the requests concurrently.
+  #     r1 = Ractor.new(wrapper.stub) do |stub|
   #       5.times do
-  #         rows = db_stub.execute("select * from numbers")
+  #         stub.execute("select * from numbers")
   #       end
   #       :ok
   #     end
-  #     r2 = Ractor.new(wrapper.stub) do |db_stub|
+  #     r2 = Ractor.new(wrapper.stub) do |stub|
   #       5.times do
-  #         rows = db_stub.execute("select * from numbers")
+  #         stub.execute("select * from numbers")
   #       end
   #       :ok
   #     end
@@ -139,7 +138,7 @@ class Ractor
   #     # When running a wrapper with :use_current_ractor, you do not need to
   #     # recover the object, because it was never moved. The recover_object
   #     # method is not available.
-  #     #     db2 = wrapper.recover_object  # <= raises Ractor::Error
+  #     #     db2 = wrapper.recover_object  # <= raises Ractor::Wrapper::Error
   #
   # ## Features
   #
