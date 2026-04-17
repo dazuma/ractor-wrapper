@@ -799,7 +799,7 @@ class Ractor
     # block invoked via the fiber-suspend path. The fiber_id identifies which
     # suspended fiber on the server should be resumed with this value.
     #
-    FiberReturnMessage = ::Data.define(:fiber_id, :value)
+    FiberReturnMessage = ::Data.define(:value, :fiber_id)
 
     ##
     # @private
@@ -808,7 +808,7 @@ class Ractor
     # identifies which suspended fiber on the server should be resumed and
     # have this exception raised inside it.
     #
-    FiberExceptionMessage = ::Data.define(:fiber_id, :exception)
+    FiberExceptionMessage = ::Data.define(:exception, :fiber_id)
 
     private
 
@@ -907,7 +907,7 @@ class Ractor
     def send_block_result(message, value, settings)
       case message
       when FiberYieldMessage
-        @port.send(FiberReturnMessage.new(fiber_id: message.fiber_id, value: value),
+        @port.send(FiberReturnMessage.new(value: value, fiber_id: message.fiber_id),
                    move: settings.block_results == :move)
       when BlockingYieldMessage
         message.reply_port.send(ReturnMessage.new(value), move: settings.block_results == :move)
@@ -921,7 +921,7 @@ class Ractor
     def send_block_exception(message, exception)
       case message
       when FiberYieldMessage
-        @port.send(FiberExceptionMessage.new(fiber_id: message.fiber_id, exception: exception))
+        @port.send(FiberExceptionMessage.new(exception: exception, fiber_id: message.fiber_id))
       when BlockingYieldMessage
         message.reply_port.send(ExceptionMessage.new(exception))
       end

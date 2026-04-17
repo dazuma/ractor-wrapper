@@ -131,8 +131,8 @@ to the appropriate response path based on the message class.
 **New (block result messages for the fiber path):**
 
 ```ruby
-FiberReturnMessage    = ::Data.define(:fiber_id, :value)
-FiberExceptionMessage = ::Data.define(:fiber_id, :exception)
+FiberReturnMessage    = ::Data.define(:value, :fiber_id)
+FiberExceptionMessage = ::Data.define(:exception, :fiber_id)
 ```
 
 No other message types change.
@@ -158,7 +158,7 @@ def handle_yield(message, transaction, settings, method_name, &)
   # ... run block, collect result or exception ...
   case message
   when FiberYieldMessage
-    @port.send(FiberReturnMessage.new(fiber_id: message.fiber_id, value: result),
+    @port.send(FiberReturnMessage.new(value: result, fiber_id: message.fiber_id),
                move: settings.block_results == :move)
   when BlockingYieldMessage
     message.reply_port.send(ReturnMessage.new(result),

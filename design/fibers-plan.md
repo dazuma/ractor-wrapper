@@ -40,8 +40,8 @@ within 2s and returns the expected values. Currently deadlocks.
 **Green.**
 - Replace `YieldMessage` with `BlockingYieldMessage` (pure rename throughout).
 - Add new message types: `FiberYieldMessage(:args, :kwargs, :fiber_id)`,
-  `FiberReturnMessage(:fiber_id, :value)`,
-  `FiberExceptionMessage(:fiber_id, :exception)`.
+  `FiberReturnMessage(:value, :fiber_id)`,
+  `FiberExceptionMessage(:exception, :fiber_id)`.
 - Update caller side (`Wrapper#call`, `handle_yield`) to handle both
   `FiberYieldMessage` and `BlockingYieldMessage` — fiber path sends
   `BlockReturn`/`BlockException` to `@port`; blocking path sends
