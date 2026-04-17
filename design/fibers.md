@@ -86,7 +86,7 @@ Caller                                    Server
   |-- CallMessage(reply_port) ----------->|   (server starts Fiber F)
   |<- FiberYieldMessage(args, fiber_id) --|   (Fiber F calls Fiber.yield)
   |   [runs block, possibly calling stub] |   (main loop keeps reading @port)
-  |-- BlockReturnMessage(fiber_id) ------>|   (goes through @port, not a temp port)
+  |-- FiberReturnMessage(fiber_id) ------>|   (goes through @port, not a temp port)
   |                              [resumes F]
   |<- ReturnMessage(result) --------------|   (Fiber F completes)
 ```
@@ -131,8 +131,8 @@ to the appropriate response path based on the message class.
 **New (block result messages for the fiber path):**
 
 ```ruby
-BlockReturnMessage    = ::Data.define(:fiber_id, :value)
-BlockExceptionMessage = ::Data.define(:fiber_id, :exception)
+FiberReturnMessage    = ::Data.define(:fiber_id, :value)
+FiberExceptionMessage = ::Data.define(:fiber_id, :exception)
 ```
 
 No other message types change.
@@ -148,7 +148,7 @@ server). The new design splits into two paths depending on the yield message
 type:
 
 - **`FiberYieldMessage`**: sends the block result to `@port` (the server's
-  main port) as a `BlockReturnMessage`/`BlockExceptionMessage`, tagging with
+  main port) as a `FiberReturnMessage`/`FiberExceptionMessage`, tagging with
   `fiber_id` so the server knows which fiber to resume.
 - **`BlockingYieldMessage`**: sends `ReturnMessage`/`ExceptionMessage` directly
   to `message.reply_port` — unchanged from current behavior.
@@ -158,13 +158,13 @@ def handle_yield(message, transaction, settings, method_name, &)
   # ... run block, collect result or exception ...
   case message
   when FiberYieldMessage
-    @port.send(BlockReturnMessage.new(fiber_id: message.fiber_id, value: result),
+    @port.send(FiberReturnMessage.new(fiber_id: message.fiber_id, value: result),
                move: settings.block_results == :move)
   when BlockingYieldMessage
     message.reply_port.send(ReturnMessage.new(result),
                             move: settings.block_results == :move)
   end
-  # (similarly for exceptions: BlockExceptionMessage vs ExceptionMessage)
+  # (similarly for exceptions: FiberExceptionMessage vs ExceptionMessage)
 end
 ```
 
@@ -230,8 +230,8 @@ def fiber_yield_block(message, args, kwargs)
   message.reply_port.send(yield_message, move: message.settings.block_arguments == :move)
   reply = ::Fiber.yield          # suspend; resumed by main loop with a result message
   case reply
-  when BlockExceptionMessage then raise reply.exception
-  when BlockReturnMessage    then reply.value
+  when FiberExceptionMessage then raise reply.exception
+  when FiberReturnMessage    then reply.value
   end
 end
 ```
@@ -288,7 +288,7 @@ main_loop:
       @pending_fibers[fiber.object_id] = fiber
       fiber.resume
       @pending_fibers.delete(fiber.object_id) unless fiber.alive?
-    when BlockReturnMessage, BlockExceptionMessage
+    when FiberReturnMessage, FiberExceptionMessage
       fiber = @pending_fibers[message.fiber_id]
       if fiber
         fiber.resume(message)
@@ -318,7 +318,7 @@ Work is divided across two kinds of queues:
 - **One shared queue** for new `CallMessage`s — any idle worker may take work
   from here.
 - **N thread-specific queues** (one per worker) for fiber resume items
-  (`BlockReturnMessage`/`BlockExceptionMessage`) — routed to the worker that
+  (`FiberReturnMessage`/`FiberExceptionMessage`) — routed to the worker that
   owns the fiber.
 
 The main loop's dispatch rule is simple: new jobs go to the shared queue; block
@@ -411,7 +411,7 @@ when CallMessage
     @multi_queue_cond.signal
   end
 
-when BlockReturnMessage | BlockExceptionMessage
+when FiberReturnMessage | FiberExceptionMessage
   @multi_queue_mutex.synchronize do
     worker_num = @fiber_to_worker[message.fiber_id]
     if worker_num
@@ -479,7 +479,7 @@ a bug.
 
 Upon receiving `StopMessage`, the main loop enqueues the shutdown sentinel
 (`nil`) to all worker thread-specific queues immediately, then continues
-routing `BlockReturnMessage`/`BlockExceptionMessage`s to workers so that
+routing `FiberReturnMessage`/`FiberExceptionMessage`s to workers so that
 in-progress fibers complete normally. Each worker defers its own shutdown
 (re-enqueuing the sentinel) until its local fibers have all completed. See
 "Graceful Stop with Pending Fibers" below for details.
@@ -496,14 +496,14 @@ normally. Only new `CallMessage`s are refused.
 ### Sequential mode
 
 After receiving `StopMessage`, the main loop stops accepting new `CallMessage`s
-but continues processing `BlockReturnMessage`/`BlockExceptionMessage` messages
+but continues processing `FiberReturnMessage`/`FiberExceptionMessage` messages
 to resume pending fibers. It exits only once all fibers have completed (i.e.,
 `@pending_fibers` is empty).
 
 ### Threaded mode
 
 The main loop enters the stopping phase: it refuses new `CallMessage`s but
-continues routing `BlockReturnMessage`/`BlockExceptionMessage` to the
+continues routing `FiberReturnMessage`/`FiberExceptionMessage` to the
 appropriate worker thread-specific queues.
 
 Upon receiving `StopMessage`, the main loop enqueues the shutdown sentinel
@@ -551,7 +551,7 @@ This is called only in crash/forced-termination paths:
   after receiving an unexpected `WorkerStoppedMessage`.
 
 **Orphaned block results:** When fibers are aborted, a caller whose fiber was
-just killed may still send a `BlockReturnMessage` to `@port` (the caller was
+just killed may still send a `FiberReturnMessage` to `@port` (the caller was
 mid-block and hadn't yet received the `ExceptionMessage`). The main loop's
 dispatch handles this naturally: the `@fiber_to_worker` lookup returns nil for
 the dead fiber, and the message is discarded. No special mechanism is needed.
@@ -633,8 +633,8 @@ end
 ```
 
 The `fiber_id` should be passed:
-- In the main loop, when dispatching `BlockReturnMessage`/
-  `BlockExceptionMessage` and resuming fibers.
+- In the main loop, when dispatching `FiberReturnMessage`/
+  `FiberExceptionMessage` and resuming fibers.
 - In `fiber_yield_block`, when sending `FiberYieldMessage` and when resuming
   from `Fiber.yield`.
 - In `abort_pending_fibers`, when raising into suspended fibers.

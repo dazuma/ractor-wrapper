@@ -40,8 +40,8 @@ within 2s and returns the expected values. Currently deadlocks.
 **Green.**
 - Replace `YieldMessage` with `BlockingYieldMessage` (pure rename throughout).
 - Add new message types: `FiberYieldMessage(:args, :kwargs, :fiber_id)`,
-  `BlockReturnMessage(:fiber_id, :value)`,
-  `BlockExceptionMessage(:fiber_id, :exception)`.
+  `FiberReturnMessage(:fiber_id, :value)`,
+  `FiberExceptionMessage(:fiber_id, :exception)`.
 - Update caller side (`Wrapper#call`, `handle_yield`) to handle both
   `FiberYieldMessage` and `BlockingYieldMessage` — fiber path sends
   `BlockReturn`/`BlockException` to `@port`; blocking path sends
@@ -49,7 +49,7 @@ within 2s and returns the expected values. Currently deadlocks.
 - Rewrite `Server#make_block` to use the fiber path (no hybrid check yet — the
   basic test goes through this path correctly).
 - Update sequential-mode `Server#main_loop`: spawn a `Fiber` per `CallMessage`,
-  store in `@pending_fibers`, and on `BlockReturnMessage`/`BlockExceptionMessage`
+  store in `@pending_fibers`, and on `FiberReturnMessage`/`FiberExceptionMessage`
   resume the right fiber.
 
 **Commit:** `feat: Sequential-mode fiber execution for re-entrant block calls`
@@ -99,7 +99,7 @@ call `wrapper.async_stop`; verify (a) a new method call raises `StoppedError`,
 
 **Green.** Add a sequential-mode "stopping" phase: after `StopMessage`, refuse
 new `CallMessage`s with `StoppedError`, but continue draining
-`BlockReturnMessage`/`BlockExceptionMessage` from `@port` until
+`FiberReturnMessage`/`FiberExceptionMessage` from `@port` until
 `@pending_fibers` is empty.
 
 **Commit:** `feat: Drain pending fibers during graceful stop (sequential mode)`
@@ -135,7 +135,7 @@ Currently deadlocks (all worker threads blocked).
   design §"Worker thread loop": local `pending` hash, `dequeue_work` that
   prioritizes the worker's thread queue, then the shared queue.
 - Update `main_loop` threaded dispatch: `CallMessage` → `@shared_queue`;
-  `BlockReturnMessage`/`BlockExceptionMessage` → `@thread_queues[worker_num]`
+  `FiberReturnMessage`/`FiberExceptionMessage` → `@thread_queues[worker_num]`
   via `@fiber_to_worker` lookup. If lookup misses (fiber dead), discard.
 
 **Commit:** `feat: Multi-queue fiber dispatch in threaded mode`

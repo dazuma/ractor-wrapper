@@ -788,7 +788,7 @@ class Ractor
     # @private
     # Message sent from a server to request a yield block run, in the
     # fiber-suspend path. The server suspends its method-handling fiber and
-    # is resumed when a BlockReturnMessage or BlockExceptionMessage tagged
+    # is resumed when a FiberReturnMessage or FiberExceptionMessage tagged
     # with the same fiber_id arrives back on the server's main port.
     #
     FiberYieldMessage = ::Data.define(:args, :kwargs, :fiber_id)
@@ -799,7 +799,7 @@ class Ractor
     # block invoked via the fiber-suspend path. The fiber_id identifies which
     # suspended fiber on the server should be resumed with this value.
     #
-    BlockReturnMessage = ::Data.define(:fiber_id, :value)
+    FiberReturnMessage = ::Data.define(:fiber_id, :value)
 
     ##
     # @private
@@ -808,7 +808,7 @@ class Ractor
     # identifies which suspended fiber on the server should be resumed and
     # have this exception raised inside it.
     #
-    BlockExceptionMessage = ::Data.define(:fiber_id, :exception)
+    FiberExceptionMessage = ::Data.define(:fiber_id, :exception)
 
     private
 
@@ -907,7 +907,7 @@ class Ractor
     def send_block_result(message, value, settings)
       case message
       when FiberYieldMessage
-        @port.send(BlockReturnMessage.new(fiber_id: message.fiber_id, value: value),
+        @port.send(FiberReturnMessage.new(fiber_id: message.fiber_id, value: value),
                    move: settings.block_results == :move)
       when BlockingYieldMessage
         message.reply_port.send(ReturnMessage.new(value), move: settings.block_results == :move)
@@ -921,7 +921,7 @@ class Ractor
     def send_block_exception(message, exception)
       case message
       when FiberYieldMessage
-        @port.send(BlockExceptionMessage.new(fiber_id: message.fiber_id, exception: exception))
+        @port.send(FiberExceptionMessage.new(fiber_id: message.fiber_id, exception: exception))
       when BlockingYieldMessage
         message.reply_port.send(ExceptionMessage.new(exception))
       end
@@ -1044,7 +1044,7 @@ class Ractor
       #     In sequential mode, the method runs inside a Fiber so that it can
       #     suspend (via Fiber.yield) when its caller-side block needs to make
       #     a re-entrant call back into this wrapper.
-      # *   If it receives a BlockReturnMessage or BlockExceptionMessage, it
+      # *   If it receives a FiberReturnMessage or FiberExceptionMessage, it
       #     looks up the suspended fiber by fiber_id and resumes it with the
       #     message. Sequential mode only; threaded mode currently does not
       #     use the fiber-suspend path.
@@ -1069,7 +1069,7 @@ class Ractor
             else
               start_method_fiber(message)
             end
-          when BlockReturnMessage, BlockExceptionMessage
+          when FiberReturnMessage, FiberExceptionMessage
             resume_method_fiber(message)
           when WorkerStoppedMessage
             maybe_log("Received unexpected WorkerStoppedMessage")
@@ -1359,7 +1359,7 @@ class Ractor
       ##
       # Yield to a caller-side block via the fiber-suspend path. The current
       # fiber's id is sent in the FiberYieldMessage so the caller knows which
-      # BlockReturnMessage/BlockExceptionMessage to send back. The fiber then
+      # FiberReturnMessage/FiberExceptionMessage to send back. The fiber then
       # suspends; main_loop will resume it with the reply message when one
       # arrives on @port.
       #
@@ -1369,9 +1369,9 @@ class Ractor
         message.reply_port.send(yield_message, move: message.settings.block_arguments == :move)
         reply = ::Fiber.yield
         case reply
-        when BlockExceptionMessage
+        when FiberExceptionMessage
           raise reply.exception
-        when BlockReturnMessage
+        when FiberReturnMessage
           reply.value
         end
       end

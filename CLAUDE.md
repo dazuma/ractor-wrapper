@@ -43,9 +43,9 @@ The entire library lives in `lib/ractor/wrapper.rb`. The public entry point is `
 
 ### Message protocol
 
-All inter-Ractor communication uses frozen message structs defined in the file: `CallMessage`, `ReturnMessage`, `ExceptionMessage`, `FiberYieldMessage`, `BlockingYieldMessage`, `BlockReturnMessage`, `BlockExceptionMessage`, `StopMessage`, `JoinMessage`, `WorkerStoppedMessage`. Block calls round-trip via one of two paths:
+All inter-Ractor communication uses frozen message structs defined in the file: `CallMessage`, `ReturnMessage`, `ExceptionMessage`, `FiberYieldMessage`, `BlockingYieldMessage`, `FiberReturnMessage`, `FiberExceptionMessage`, `StopMessage`, `JoinMessage`, `WorkerStoppedMessage`. Block calls round-trip via one of two paths:
 
-- **Fiber-suspend path** (sequential mode): the server sends a `FiberYieldMessage` (carrying the `fiber_id` of the suspended method-handling fiber) to the caller Ractor. The caller executes the block and sends a `BlockReturnMessage` or `BlockExceptionMessage` back to the server's main port; the main loop looks up the fiber by id and resumes it with the reply.
+- **Fiber-suspend path** (sequential mode): the server sends a `FiberYieldMessage` (carrying the `fiber_id` of the suspended method-handling fiber) to the caller Ractor. The caller executes the block and sends a `FiberReturnMessage` or `FiberExceptionMessage` back to the server's main port; the main loop looks up the fiber by id and resumes it with the reply.
 - **Blocking-fallback path** (threaded mode, and future nested-fiber/spawned-thread cases): the server allocates a temporary reply port, sends a `BlockingYieldMessage` carrying that port, and blocks on it. The caller responds with a `ReturnMessage` or `ExceptionMessage` directly to that temporary port. This path can deadlock under re-entrant calls but is preserved where the fiber-suspend path is not safe.
 
 ### Lifecycle
