@@ -638,4 +638,37 @@ describe ::Ractor::Wrapper do
       end
     end
   end
+
+  describe "fiber-based re-entrant block calls" do
+    include TimeoutHelper
+
+    # Bound the cleanup so a wrapper that has deadlocked under test cannot hang
+    # the entire suite. Under correct behavior the join completes immediately.
+    def bounded_cleanup(wrapper)
+      ::Thread.new { wrapper.async_stop.join }.join(3)
+    end
+
+    [
+      {desc: "isolated", opts: {}},
+      {desc: "local", opts: {use_current_ractor: true}},
+    ].each do |wrapper_config|
+      describe "in sequential mode (#{wrapper_config[:desc]})" do
+        let(:base_opts) { wrapper_config[:opts] }
+
+        before { @wrapper = nil }
+        after { bounded_cleanup(@wrapper) if @wrapper }
+
+        it "does not deadlock when a block re-enters the wrapper" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            collected = []
+            stub.each_item(["a", "b"]) { |item| collected << stub.echo_args(item) }
+            collected
+          end
+          assert_equal(['["a"], {}', '["b"], {}'], results)
+        end
+      end
+    end
+  end
 end

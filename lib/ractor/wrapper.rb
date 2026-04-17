@@ -641,7 +641,7 @@ class Ractor
       loop do
         reply_message = reply_port.receive
         case reply_message
-        when YieldMessage
+        when FiberYieldMessage, BlockingYieldMessage
           handle_yield(reply_message, transaction, settings, method_name, &)
         when ReturnMessage
           maybe_log("Received result", method_name: method_name, transaction: transaction)
@@ -776,9 +776,39 @@ class Ractor
 
     ##
     # @private
-    # Message sent from a server to request a yield block run
+    # Message sent from a server to request a yield block run, in the
+    # blocking-fallback path. The server allocates a temporary reply_port and
+    # blocks waiting for a response on it. Used when the wrapped object yields
+    # from a context where Fiber.yield is not safe (e.g., inside a nested
+    # fiber such as an Enumerator's generator, or in a spawned thread).
     #
-    YieldMessage = ::Data.define(:args, :kwargs, :reply_port)
+    BlockingYieldMessage = ::Data.define(:args, :kwargs, :reply_port)
+
+    ##
+    # @private
+    # Message sent from a server to request a yield block run, in the
+    # fiber-suspend path. The server suspends its method-handling fiber and
+    # is resumed when a BlockReturnMessage or BlockExceptionMessage tagged
+    # with the same fiber_id arrives back on the server's main port.
+    #
+    FiberYieldMessage = ::Data.define(:args, :kwargs, :fiber_id)
+
+    ##
+    # @private
+    # Message sent from a caller back to a server, carrying the result of a
+    # block invoked via the fiber-suspend path. The fiber_id identifies which
+    # suspended fiber on the server should be resumed with this value.
+    #
+    BlockReturnMessage = ::Data.define(:fiber_id, :value)
+
+    ##
+    # @private
+    # Message sent from a caller back to a server, carrying an exception
+    # raised by a block invoked via the fiber-suspend path. The fiber_id
+    # identifies which suspended fiber on the server should be resumed and
+    # have this exception raised inside it.
+    #
+    BlockExceptionMessage = ::Data.define(:fiber_id, :exception)
 
     private
 
@@ -843,6 +873,11 @@ class Ractor
 
     ##
     # Handle a call to a block directed to run in the caller environment.
+    # Dispatches the block result or exception based on which yield-message
+    # variant arrived: a FiberYieldMessage routes the response back to the
+    # server's main port (so the suspended fiber can be resumed), while a
+    # BlockingYieldMessage routes it to the temporary reply_port the server
+    # is blocked on.
     #
     def handle_yield(message, transaction, settings, method_name)
       maybe_log("Yielding to block", method_name: method_name, transaction: transaction)
@@ -850,18 +885,45 @@ class Ractor
         block_result = yield(*message.args, **message.kwargs)
         block_result = nil if settings.block_results == :void
         maybe_log("Sending block result", method_name: method_name, transaction: transaction)
-        message.reply_port.send(ReturnMessage.new(block_result), move: settings.block_results == :move)
+        send_block_result(message, block_result, settings)
       rescue ::Exception => e # rubocop:disable Lint/RescueException
         maybe_log("Sending block exception", method_name: method_name, transaction: transaction)
         begin
-          message.reply_port.send(ExceptionMessage.new(e))
+          send_block_exception(message, e)
         rescue ::StandardError
           begin
-            message.reply_port.send(ExceptionMessage.new(::StandardError.new(e.inspect)))
+            send_block_exception(message, ::StandardError.new(e.inspect))
           rescue ::StandardError
             maybe_log("Failure to send block reply", method_name: method_name, transaction: transaction)
           end
         end
+      end
+    end
+
+    ##
+    # Send a block return value to the appropriate destination based on the
+    # yield-message variant.
+    #
+    def send_block_result(message, value, settings)
+      case message
+      when FiberYieldMessage
+        @port.send(BlockReturnMessage.new(fiber_id: message.fiber_id, value: value),
+                   move: settings.block_results == :move)
+      when BlockingYieldMessage
+        message.reply_port.send(ReturnMessage.new(value), move: settings.block_results == :move)
+      end
+    end
+
+    ##
+    # Send a block exception to the appropriate destination based on the
+    # yield-message variant.
+    #
+    def send_block_exception(message, exception)
+      case message
+      when FiberYieldMessage
+        @port.send(BlockExceptionMessage.new(fiber_id: message.fiber_id, exception: exception))
+      when BlockingYieldMessage
+        message.reply_port.send(ExceptionMessage.new(exception))
       end
     end
 
@@ -920,6 +982,11 @@ class Ractor
         @enable_logging = enable_logging
         @threads_requested = threads.positive? ? threads : false
         @join_requests = []
+        # Maps fiber_id (Integer) => Fiber for method-handling fibers that have
+        # suspended (via Fiber.yield) waiting for a block result. Sequential
+        # mode uses this to route incoming BlockReturn/BlockException messages
+        # back to the right fiber. Threaded mode does not currently use it.
+        @pending_fibers = {}
       end
 
       ##
@@ -974,6 +1041,13 @@ class Ractor
       #
       # *   If it receives a CallMessage, it either runs the method (when in
       #     sequential mode) or adds it to the job queue (when in worker mode).
+      #     In sequential mode, the method runs inside a Fiber so that it can
+      #     suspend (via Fiber.yield) when its caller-side block needs to make
+      #     a re-entrant call back into this wrapper.
+      # *   If it receives a BlockReturnMessage or BlockExceptionMessage, it
+      #     looks up the suspended fiber by fiber_id and resumes it with the
+      #     message. Sequential mode only; threaded mode currently does not
+      #     use the fiber-suspend path.
       # *   If it receives a StopMessage, it exits the main loop and proceeds
       #     to the termination logic.
       # *   If it receives a JoinMessage, it adds it to the list of join ports
@@ -993,8 +1067,10 @@ class Ractor
             if @threads_requested
               @queue.enq(message)
             else
-              handle_method(message)
+              start_method_fiber(message)
             end
+          when BlockReturnMessage, BlockExceptionMessage
+            resume_method_fiber(message)
           when WorkerStoppedMessage
             maybe_log("Received unexpected WorkerStoppedMessage")
             @active_workers.delete(message.worker_num) if @threads_requested
@@ -1007,6 +1083,33 @@ class Ractor
             @join_requests << message.reply_port
           end
         end
+      end
+
+      ##
+      # Spawn a fiber to handle a CallMessage in sequential mode. If the
+      # method-handling fiber suspends via Fiber.yield (because its caller-side
+      # block re-entered this wrapper), the fiber is registered in
+      # `@pending_fibers` so that the matching block-return message can later
+      # resume it.
+      #
+      def start_method_fiber(message)
+        fiber = ::Fiber.new { handle_method(message) }
+        fiber_id = fiber.object_id
+        @pending_fibers[fiber_id] = fiber
+        fiber.resume
+        @pending_fibers.delete(fiber_id) unless fiber.alive?
+      end
+
+      ##
+      # Resume a previously-suspended method-handling fiber, delivering the
+      # block-result message as the return value of its Fiber.yield call.
+      # Silently ignores unknown fiber_ids (the fiber may have been aborted).
+      #
+      def resume_method_fiber(message)
+        fiber = @pending_fibers[message.fiber_id]
+        return unless fiber
+        fiber.resume(message)
+        @pending_fibers.delete(message.fiber_id) unless fiber.alive?
       end
 
       ##
@@ -1233,25 +1336,66 @@ class Ractor
       #     with the block arguments, to run the block in the caller's
       #     environment
       #
+      # In sequential mode, the returned proc uses the fiber-suspend path
+      # (Fiber.yield) so the server can continue processing other messages,
+      # including re-entrant calls from inside the block. In threaded mode,
+      # the returned proc uses the blocking path (a temporary reply port).
+      # Future work will extend the fiber path to threaded mode as well.
+      #
       def make_block(message)
         return message.block_arg unless message.block_arg == :send_block_message
+        use_fiber_path = !@threads_requested
         proc do |*args, **kwargs|
-          reply_port = ::Ractor::Port.new
-          reply_message = begin
-            args.map! { |arg| arg.equal?(@object) ? @stub : arg }
-            kwargs.transform_values! { |arg| arg.equal?(@object) ? @stub : arg }
-            yield_message = YieldMessage.new(args: args, kwargs: kwargs, reply_port: reply_port)
-            message.reply_port.send(yield_message, move: message.settings.block_arguments == :move)
-            reply_port.receive
-          ensure
-            reply_port.close
+          args.map! { |arg| arg.equal?(@object) ? @stub : arg }
+          kwargs.transform_values! { |arg| arg.equal?(@object) ? @stub : arg }
+          if use_fiber_path
+            fiber_yield_block(message, args, kwargs)
+          else
+            blocking_yield_block(message, args, kwargs)
           end
-          case reply_message
-          when ExceptionMessage
-            raise reply_message.exception
-          when ReturnMessage
-            reply_message.value
-          end
+        end
+      end
+
+      ##
+      # Yield to a caller-side block via the fiber-suspend path. The current
+      # fiber's id is sent in the FiberYieldMessage so the caller knows which
+      # BlockReturnMessage/BlockExceptionMessage to send back. The fiber then
+      # suspends; main_loop will resume it with the reply message when one
+      # arrives on @port.
+      #
+      def fiber_yield_block(message, args, kwargs)
+        fiber_id = ::Fiber.current.object_id
+        yield_message = FiberYieldMessage.new(args: args, kwargs: kwargs, fiber_id: fiber_id)
+        message.reply_port.send(yield_message, move: message.settings.block_arguments == :move)
+        reply = ::Fiber.yield
+        case reply
+        when BlockExceptionMessage
+          raise reply.exception
+        when BlockReturnMessage
+          reply.value
+        end
+      end
+
+      ##
+      # Yield to a caller-side block via the blocking-fallback path: allocate
+      # a temporary reply_port and block waiting for a response on it. Used
+      # when the fiber-suspend path is not available (currently: threaded
+      # mode; future: also nested-fiber and spawned-thread invocations).
+      #
+      def blocking_yield_block(message, args, kwargs)
+        reply_port = ::Ractor::Port.new
+        reply_message = begin
+          yield_message = BlockingYieldMessage.new(args: args, kwargs: kwargs, reply_port: reply_port)
+          message.reply_port.send(yield_message, move: message.settings.block_arguments == :move)
+          reply_port.receive
+        ensure
+          reply_port.close
+        end
+        case reply_message
+        when ExceptionMessage
+          raise reply_message.exception
+        when ReturnMessage
+          reply_message.value
         end
       end
 
