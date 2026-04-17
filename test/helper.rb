@@ -52,4 +52,26 @@ class RemoteObject
   def block_args_self(obj1, obj2)
     yield(obj1, self, kwobj: obj2, kwself: self)
   end
+
+  def each_item(items, &)
+    items.each(&)
+  end
+end
+
+# Helpers for tests that exercise scenarios that previously deadlocked.
+# Include this module in a describe block to gain access to +with_timeout+.
+module TimeoutHelper
+  # Runs the block in a separate thread and enforces a timeout. If the thread
+  # does not return within +seconds+, fails with a Minitest::Assertion that
+  # includes the stuck thread's backtrace. Returns the block's value on success.
+  def with_timeout(seconds = 2, &block)
+    result = nil
+    thread = ::Thread.new { result = block.call }
+    unless thread.join(seconds)
+      backtrace = thread.backtrace&.join("\n") || "(no backtrace available)"
+      thread.kill
+      raise ::Minitest::Assertion, "Timed out after #{seconds}s. Thread backtrace:\n#{backtrace}"
+    end
+    result
+  end
 end

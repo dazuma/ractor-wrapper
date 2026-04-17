@@ -26,7 +26,7 @@ every green step. Conventional Commits format. Run `toys test` (and ideally
 - An `each_item(items, &block)` method on `RemoteObject` (yields each item) for
   reuse by deadlock tests.
 
-No commit on its own — first commit lands with phase 1.1.
+**Commit:** `test: Infrastructure updates for fiber changes`
 
 ---
 
