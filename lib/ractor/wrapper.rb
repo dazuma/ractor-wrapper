@@ -1342,13 +1342,19 @@ class Ractor
       # the returned proc uses the blocking path (a temporary reply port).
       # Future work will extend the fiber path to threaded mode as well.
       #
+      # Hybrid fallback: if the proc is invoked from a different fiber than
+      # the method-handling fiber (e.g. from inside an Enumerator generator
+      # or a spawned fiber), the fiber path would call Fiber.yield on the
+      # wrong fiber. In that case the proc falls back to the blocking path.
+      #
       def make_block(message)
         return message.block_arg unless message.block_arg == :send_block_message
         use_fiber_path = !@threads_requested
+        expected_fiber = ::Fiber.current if use_fiber_path
         proc do |*args, **kwargs|
           args.map! { |arg| arg.equal?(@object) ? @stub : arg }
           kwargs.transform_values! { |arg| arg.equal?(@object) ? @stub : arg }
-          if use_fiber_path
+          if use_fiber_path && ::Fiber.current.equal?(expected_fiber)
             fiber_yield_block(message, args, kwargs)
           else
             blocking_yield_block(message, args, kwargs)

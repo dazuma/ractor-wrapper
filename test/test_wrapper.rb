@@ -685,6 +685,15 @@ describe ::Ractor::Wrapper do
           end
           assert_equal(["[111], {}", "[121], {}", "[112], {}", "[122], {}"], results)
         end
+
+        it "invokes the block correctly when called from within an Enumerator generator" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            stub.each_via_generator(["x", "y"], &:upcase)
+          end
+          assert_equal(["X", "Y"], results)
+        end
       end
     end
   end

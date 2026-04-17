@@ -56,6 +56,21 @@ class RemoteObject
   def each_item(items, &)
     items.each(&)
   end
+
+  # Iterates +items+ inside an Enumerator's generator block, calling the
+  # caller-side block from within the generator's internal fiber. Uses
+  # +next+ (rather than +each+ with a block) to force the generator to run
+  # in a separate fiber. Used to exercise the hybrid fallback path: the
+  # proxy proc must detect that it is no longer running in the method-
+  # handling fiber and avoid Fiber.yield.
+  def each_via_generator(items, &block)
+    results = []
+    enum = ::Enumerator.new do |y|
+      items.each { |item| y << block.call(item) }
+    end
+    loop { results << enum.next }
+    results
+  end
 end
 
 # Helpers for tests that exercise scenarios that previously deadlocked.
