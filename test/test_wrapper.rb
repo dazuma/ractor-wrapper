@@ -668,6 +668,23 @@ describe ::Ractor::Wrapper do
           end
           assert_equal(['["a"], {}', '["b"], {}'], results)
         end
+
+        it "does not deadlock when blocks re-enter the wrapper at depth 3" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            collected = []
+            stub.each_item([1, 2]) do |a|
+              stub.each_item([10, 20]) do |b|
+                stub.each_item([100]) do |c|
+                  collected << stub.echo_args(a + b + c)
+                end
+              end
+            end
+            collected
+          end
+          assert_equal(["[111], {}", "[121], {}", "[112], {}", "[122], {}"], results)
+        end
       end
     end
   end
