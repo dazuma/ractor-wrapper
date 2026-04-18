@@ -1114,10 +1114,12 @@ class Ractor
         @enable_logging = enable_logging
         @threads_requested = threads.positive? ? threads : false
         @join_requests = []
-        # Maps fiber_id (Integer) => Fiber for method-handling fibers that have
-        # suspended (via Fiber.yield) waiting for a block result. Sequential
-        # mode uses this to route incoming BlockReturn/BlockException messages
-        # back to the right fiber. Threaded mode does not currently use it.
+        # Sequential mode only: maps fiber_id (Integer) => Fiber for
+        # method-handling fibers that have suspended (via Fiber.yield) waiting
+        # for a block result. Used to route incoming
+        # FiberReturnMessage/FiberExceptionMessage back to the right fiber.
+        # Threaded mode tracks pending fibers per-worker (in `worker_loop`'s
+        # local `pending` hash) and routes via `Dispatcher`.
         @pending_fibers = {}
       end
 
@@ -1155,15 +1157,17 @@ class Ractor
       end
 
       ##
-      # Start the worker threads. Each thread picks up methods to run from a
-      # shared queue. Called only if worker threading is enabled.
+      # Start the worker threads. Each thread picks up work via the
+      # `Dispatcher`, which routes new `CallMessage`s through a shared queue
+      # and routes fiber-resume messages to the specific worker that owns the
+      # suspended fiber. Called only if worker threading is enabled.
       #
       def start_workers
         maybe_log("Spawning #{@threads_requested} worker threads")
-        @queue = ::Queue.new
+        @dispatcher = Dispatcher.new(@threads_requested)
         @active_workers = {}
-        (1..@threads_requested).each do |worker_num|
-          @active_workers[worker_num] = ::Thread.new { worker_thread(worker_num) }
+        (0...@threads_requested).each do |worker_num|
+          @active_workers[worker_num] = ::Thread.new { worker_loop(worker_num) }
         end
       end
 
@@ -1171,15 +1175,17 @@ class Ractor
       # This is the main loop, listening on the inbox and handling messages for
       # normal operation:
       #
-      # *   If it receives a CallMessage, it either runs the method (when in
-      #     sequential mode) or adds it to the job queue (when in worker mode).
-      #     In sequential mode, the method runs inside a Fiber so that it can
-      #     suspend (via Fiber.yield) when its caller-side block needs to make
-      #     a re-entrant call back into this wrapper.
+      # *   If it receives a CallMessage, it either runs the method in a
+      #     fiber (sequential mode) or hands it to the `Dispatcher`'s shared
+      #     queue (threaded mode). In both modes the method body executes
+      #     inside a `Fiber` so it can suspend (via `Fiber.yield`) when its
+      #     caller-side block needs to make a re-entrant call back into this
+      #     wrapper.
       # *   If it receives a FiberReturnMessage or FiberExceptionMessage, it
-      #     looks up the suspended fiber by fiber_id and resumes it with the
-      #     message. Sequential mode only; threaded mode currently does not
-      #     use the fiber-suspend path.
+      #     resumes the suspended fiber. In sequential mode the fiber lives
+      #     in `@pending_fibers` and is resumed inline. In threaded mode the
+      #     `Dispatcher` routes the message to the per-worker queue of the
+      #     fiber's owning worker.
       # *   If it receives a StopMessage, it exits the main loop and proceeds
       #     to the termination logic.
       # *   If it receives a JoinMessage, it adds it to the list of join ports
@@ -1194,15 +1200,9 @@ class Ractor
           maybe_log("Waiting for message in running phase")
           message = @port.receive
           case message
-          when CallMessage
-            maybe_log("Received CallMessage", call_message: message)
-            if @threads_requested
-              @queue.enq(message)
-            else
-              start_method_fiber(message)
-            end
-          when FiberReturnMessage, FiberExceptionMessage
-            resume_method_fiber(message)
+          when CallMessage then dispatch_call(message)
+          when FiberReturnMessage, FiberExceptionMessage then dispatch_fiber_resume(message)
+          when JoinMessage then @join_requests << message.reply_port
           when WorkerStoppedMessage
             maybe_log("Received unexpected WorkerStoppedMessage")
             @active_workers.delete(message.worker_num) if @threads_requested
@@ -1211,10 +1211,39 @@ class Ractor
             maybe_log("Received stop")
             drain_pending_fibers unless @threads_requested
             break
-          when JoinMessage
-            maybe_log("Received and queueing join request")
-            @join_requests << message.reply_port
           end
+        end
+      end
+
+      ##
+      # Dispatch a `CallMessage` received by the main loop. In sequential
+      # mode the method is started inline as a new fiber; in threaded mode
+      # it is handed to the dispatcher's shared queue for any worker to pick
+      # up.
+      #
+      def dispatch_call(message)
+        maybe_log("Received CallMessage", call_message: message)
+        if @threads_requested
+          @dispatcher.enqueue_call(message)
+        else
+          start_method_fiber(message)
+        end
+      end
+
+      ##
+      # Route a fiber-resume message (`FiberReturnMessage` /
+      # `FiberExceptionMessage`) to its owning fiber. In sequential mode this
+      # resumes the fiber inline; in threaded mode the dispatcher routes it to
+      # the per-worker queue of the worker that started the fiber. Logs and
+      # discards if the fiber is no longer registered (likely already finished
+      # or aborted by a crashed worker).
+      #
+      def dispatch_fiber_resume(message)
+        if @threads_requested
+          return if @dispatcher.enqueue_fiber_resume(message)
+          maybe_log("Discarding orphan fiber resume for #{message.fiber_id}")
+        else
+          resume_method_fiber(message)
         end
       end
 
@@ -1271,14 +1300,23 @@ class Ractor
       end
 
       ##
-      # This signals workers to stop by closing the queue, and then waits for
-      # all workers to report in that they have stopped. It is called only if
-      # worker threading is enabled.
+      # This signals workers to stop by closing the dispatcher, and then
+      # waits for all workers to report in that they have stopped. It is
+      # called only if worker threading is enabled.
+      #
+      # Closing the dispatcher drains any never-dispatched `CallMessage`s
+      # from its shared queue; those are refused immediately so the
+      # corresponding callers do not block forever. The dispatcher also
+      # delivers a one-shot closed signal to each worker so they can
+      # transition to a draining state.
       #
       # Responds to messages to indicate the wrapper is stopping and no longer
       # accepting new method requests:
       #
       # *   If it receives a CallMessage, it sends back a refusal exception.
+      # *   If it receives a FiberReturnMessage or FiberExceptionMessage, it
+      #     forwards it to the dispatcher so the owning worker can resume its
+      #     suspended fiber and complete the in-flight call.
       # *   If it receives a StopMessage, it does nothing (i.e. the stop
       #     operation is idempotent).
       # *   If it receives a JoinMessage, it adds it to the list of join ports
@@ -1292,13 +1330,16 @@ class Ractor
       # stopped.
       #
       def stop_workers
-        @queue.close
+        drained = @dispatcher.close
+        drained.each { |message| refuse_method(message) }
         until @active_workers.empty?
           maybe_log("Waiting for message in stopping phase")
           message = @port.receive
           case message
           when CallMessage
             refuse_method(message)
+          when FiberReturnMessage, FiberExceptionMessage
+            dispatch_fiber_resume(message)
           when WorkerStoppedMessage
             maybe_log("Acknowledged WorkerStoppedMessage: #{message.worker_num}")
             @active_workers.delete(message.worker_num)
@@ -1352,9 +1393,9 @@ class Ractor
       def crash_cleanup
         maybe_log("Running crash cleanup after: #{@crash_exception.message} (#{@crash_exception.class})")
         error = CrashedError.new("Server crashed: #{@crash_exception.message} (#{@crash_exception.class})")
-        # `@queue` should not be nil in threaded mode, but we're checking
-        # anyway just in case a crash happened during setup
-        drain_queue_after_crash(@queue, error) if @threads_requested && @queue
+        # `@dispatcher` should not be nil in threaded mode, but we're
+        # checking anyway just in case a crash happened during setup
+        drain_dispatcher_after_crash(@dispatcher, error) if @threads_requested && @dispatcher
         abort_pending_fibers(@pending_fibers, error) if !@threads_requested && @pending_fibers
         drain_inbox_after_crash(@port, error)
         # `@active_workers` should not be nil in threaded mode, but we're
@@ -1382,22 +1423,20 @@ class Ractor
       end
 
       ##
-      # Drains any remaining queued call messages after a crash, sending errors
-      # to callers whose calls had not yet been dispatched to a worker thread.
+      # Closes the dispatcher after a crash, then sends an error response
+      # to the callers of any `CallMessage`s that were still queued in the
+      # shared queue (and therefore had not yet been dispatched to a worker).
+      # Workers themselves clean up their own in-flight fibers via their
+      # ensure blocks.
       #
-      def drain_queue_after_crash(queue, error)
-        queue.close
-        loop do
-          message = queue.deq
-          break if message.nil?
-          begin
-            message.reply_port.send(ExceptionMessage.new(error))
-          rescue ::Ractor::Error
-            maybe_log("Failed to send crash error to queued caller", call_message: message)
-          end
+      def drain_dispatcher_after_crash(dispatcher, error)
+        dispatcher.close.each do |message|
+          message.reply_port.send(ExceptionMessage.new(error))
+        rescue ::Ractor::Error
+          maybe_log("Failed to send crash error to queued caller", call_message: message)
         end
       rescue ::Exception => e # rubocop:disable Lint/RescueException
-        maybe_log("Suppressed exception during drain_queue_after_crash: " \
+        maybe_log("Suppressed exception during drain_dispatcher_after_crash: " \
                   "#{e.message} (#{e.class})")
       end
 
@@ -1427,7 +1466,7 @@ class Ractor
             end
           when JoinMessage
             send_join_reply(message.reply_port)
-          when WorkerStoppedMessage, StopMessage
+          when WorkerStoppedMessage, StopMessage, FiberReturnMessage, FiberExceptionMessage
             # Ignore
           end
         end
@@ -1454,13 +1493,21 @@ class Ractor
       # is closed, the worker will send an acknowledgement message and then
       # terminate.
       #
-      def worker_thread(worker_num)
+      def worker_loop(worker_num)
         maybe_log("Worker starting", worker_num: worker_num)
-        loop do
-          maybe_log("Waiting for job", worker_num: worker_num)
-          message = @queue.deq
-          break if message.nil?
-          handle_method(message, worker_num: worker_num)
+        pending = {}
+        stopping = false
+        until stopping && pending.empty?
+          maybe_log("Waiting for work", worker_num: worker_num)
+          kind, message = @dispatcher.dequeue(worker_num, accept_calls: !stopping)
+          case kind
+          when :call
+            start_worker_fiber(message, pending, worker_num)
+          when :resume
+            resume_worker_fiber(message, pending)
+          when :closed
+            stopping = true
+          end
         end
       ensure
         maybe_log("Worker stopping", worker_num: worker_num)
@@ -1469,6 +1516,38 @@ class Ractor
         rescue ::Ractor::ClosedError
           maybe_log("Worker unable to report stop, possibly due to server crash", worker_num: worker_num)
         end
+      end
+
+      ##
+      # Start a fiber for a new `CallMessage` on this worker. Registers the
+      # fiber with the dispatcher so future fiber-resume messages route here.
+      # If the fiber completes synchronously (no `Fiber.yield`), it is
+      # immediately removed from the local `pending` hash and unregistered.
+      #
+      def start_worker_fiber(message, pending, worker_num)
+        fiber = ::Fiber.new { handle_method(message, worker_num: worker_num) }
+        fiber_id = fiber.object_id
+        pending[fiber_id] = fiber
+        @dispatcher.register_fiber(fiber_id, worker_num)
+        fiber.resume
+        return if fiber.alive?
+        pending.delete(fiber_id)
+        @dispatcher.unregister_fiber(fiber_id)
+      end
+
+      ##
+      # Resume a previously-suspended fiber with a fiber-result message. If
+      # the fiber is no longer alive (e.g. aborted), the message is silently
+      # discarded. On completion the fiber is removed from `pending` and
+      # unregistered from the dispatcher.
+      #
+      def resume_worker_fiber(message, pending)
+        fiber = pending[message.fiber_id]
+        return unless fiber
+        fiber.resume(message)
+        return if fiber.alive?
+        pending.delete(message.fiber_id)
+        @dispatcher.unregister_fiber(message.fiber_id)
       end
 
       ##
@@ -1511,11 +1590,12 @@ class Ractor
       #     with the block arguments, to run the block in the caller's
       #     environment
       #
-      # In sequential mode, the returned proc uses the fiber-suspend path
-      # (Fiber.yield) so the server can continue processing other messages,
-      # including re-entrant calls from inside the block. In threaded mode,
-      # the returned proc uses the blocking path (a temporary reply port).
-      # Future work will extend the fiber path to threaded mode as well.
+      # The returned proc uses the fiber-suspend path (Fiber.yield) so the
+      # server can continue processing other messages, including re-entrant
+      # calls from inside the block. In threaded mode, fiber resumes are
+      # routed back to the same worker that started the fiber via the
+      # `Dispatcher`'s per-worker queues (Ruby fibers cannot migrate between
+      # threads).
       #
       # Hybrid fallback: if the proc is invoked from a different fiber than
       # the method-handling fiber (e.g. from inside an Enumerator generator
@@ -1524,12 +1604,11 @@ class Ractor
       #
       def make_block(message)
         return message.block_arg unless message.block_arg == :send_block_message
-        use_fiber_path = !@threads_requested
-        expected_fiber = ::Fiber.current if use_fiber_path
+        expected_fiber = ::Fiber.current
         proc do |*args, **kwargs|
           args.map! { |arg| arg.equal?(@object) ? @stub : arg }
           kwargs.transform_values! { |arg| arg.equal?(@object) ? @stub : arg }
-          if use_fiber_path && ::Fiber.current.equal?(expected_fiber)
+          if ::Fiber.current.equal?(expected_fiber)
             fiber_yield_block(message, args, kwargs)
           else
             blocking_yield_block(message, args, kwargs)

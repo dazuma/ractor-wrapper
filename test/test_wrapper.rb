@@ -758,6 +758,30 @@ describe ::Ractor::Wrapper do
           end
         end
       end
+
+      describe "in threaded mode (#{wrapper_config[:desc]})" do
+        let(:base_opts) { wrapper_config[:opts].merge(threads: 2) }
+
+        before { @wrapper = nil }
+        after { bounded_cleanup(@wrapper) if @wrapper }
+
+        it "does not deadlock when re-entry depth exceeds the worker count" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            collected = []
+            stub.each_item([1, 2]) do |a|
+              stub.each_item([10, 20]) do |b|
+                stub.each_item([100]) do |c|
+                  collected << stub.echo_args(a + b + c)
+                end
+              end
+            end
+            collected
+          end
+          assert_equal(["[111], {}", "[121], {}", "[112], {}", "[122], {}"], results)
+        end
+      end
     end
   end
 end
