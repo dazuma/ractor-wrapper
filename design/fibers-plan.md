@@ -121,72 +121,209 @@ exception to its own `reply_port`.
 
 ## Phase 2 — Threaded-mode fiber path
 
-### 2.1 Re-entry depth exceeds thread count
+### 2.1a Standalone Dispatcher class (with unit tests)
 
-**Red.** Test: `threads: 2`, depth-3 re-entrant call, completes within 2s.
-Currently deadlocks (all worker threads blocked).
+Build the multi-queue routing logic as a private nested class
+`Server::Dispatcher` so it can be unit-tested in isolation. No `Server`
+changes in this step — the existing threaded path keeps using `@queue`.
 
-**Green.** Convert threaded mode to multi-queue dispatch:
-- Replace `@queue` with: `@multi_queue_mutex` (Mutex), `@multi_queue_cond`
-  (ConditionVariable), `@shared_queue` (Array of new `CallMessage`s),
-  `@thread_queues` (Array of per-worker Arrays for fiber resume items),
-  `@fiber_to_worker` (Hash{fiber_id => worker_num}, guarded by the mutex).
-- Rewrite `worker_thread` (rename to `worker_loop` per the design naming) per
-  design §"Worker thread loop": local `pending` hash, `dequeue_work` that
-  prioritizes the worker's thread queue, then the shared queue.
-- Update `main_loop` threaded dispatch: `CallMessage` → `@shared_queue`;
-  `FiberReturnMessage`/`FiberExceptionMessage` → `@thread_queues[worker_num]`
-  via `@fiber_to_worker` lookup. If lookup misses (fiber dead), discard.
+**Why first.** The dispatcher coordinates a mutex, a condition variable, a
+shared queue, per-worker queues, and a fiber→worker map. Bugs in this layer
+are pernicious to diagnose through end-to-end tests. Isolating it lets the
+implementer cover edge cases (priority ordering, dead-fiber handling,
+close transitions) directly.
+
+**API to build.** All methods thread-safe; all queues/maps guarded by a
+single internal `Mutex` + `ConditionVariable`.
+
+```ruby
+class Dispatcher
+  # +num_workers+: number of per-worker queues to allocate.
+  def initialize(num_workers)
+
+  # Push a new CallMessage onto the shared queue. Returns true normally,
+  # false if +close+ has been called (caller should refuse the message).
+  def enqueue_call(message)
+
+  # Push a FiberReturn/FiberException onto the queue of the worker that
+  # owns the fiber. Returns true if dispatched, false if the fiber_id is
+  # not registered (caller may discard — fiber likely already finished
+  # or was aborted).
+  def enqueue_fiber_resume(message)
+
+  # Block until the worker has work. Priority order:
+  #   1. Per-worker queue (always — these are resumes for fibers this
+  #      worker owns; must be drained even after close).
+  #   2. Shared queue, but only if +accept_calls+ is true.
+  # Returns one of:
+  #   [:resume, message]  – from per-worker queue
+  #   [:call,   message]  – from shared queue
+  #   [:closed, nil]      – returned exactly once per worker, the first
+  #                         time the worker would otherwise have blocked
+  #                         after +close+ has been called. Used to wake
+  #                         the worker so it can transition to draining
+  #                         state. Subsequent calls behave normally.
+  # If +accept_calls+ is false and the per-worker queue is empty, blocks
+  # until a resume arrives in the per-worker queue (workers in draining
+  # state should call with +accept_calls: false+ and exit on their own
+  # once their local pending hash is empty — see 2.1b for caller logic).
+  def dequeue(worker_num, accept_calls:)
+
+  # Atomically associate +fiber_id+ with +worker_num+ so subsequent
+  # +enqueue_fiber_resume+ calls land on the right worker queue.
+  def register_fiber(fiber_id, worker_num)
+
+  # Remove the fiber→worker mapping. Idempotent.
+  def unregister_fiber(fiber_id)
+
+  # Mark closed and wake all blocked workers. Idempotent.
+  def close
+end
+```
+
+**Unit tests** (new file `test/test_dispatcher.rb`). Use background threads
+with bounded `with_timeout` joins to assert blocking behavior. Cover at
+least:
+1. `enqueue_call` then `dequeue(0, accept_calls: true)` returns
+   `[:call, message]`.
+2. `register_fiber(fid, 1)` + `enqueue_fiber_resume(msg with fid)` makes
+   `dequeue(1, ...)` return `[:resume, msg]`; `dequeue(0, ...)` does NOT
+   see it (per-worker isolation).
+3. Per-worker queue takes priority: with both a queued call and a queued
+   resume for worker 0, `dequeue(0, accept_calls: true)` returns the
+   resume first.
+4. `enqueue_fiber_resume` for an unregistered fiber returns false and
+   does not block any worker.
+5. `accept_calls: false` causes worker to ignore the shared queue: with a
+   pending call and no resume, `dequeue(0, accept_calls: false)` blocks;
+   adding a resume for worker 0 unblocks it with `[:resume, ...]`.
+6. After `close`, `enqueue_call` returns false; the next `dequeue` for
+   each worker returns `[:closed, nil]` exactly once; further `dequeue`
+   calls revert to normal blocking/return behavior (so workers can still
+   drain resumes).
+7. After `close`, a worker blocked in `dequeue` is woken with
+   `[:closed, nil]`.
+8. Concurrency stress: N producer threads enqueue M calls each, K worker
+   threads dequeue and count; total dequeued equals N*M.
+
+**Commit:** `feat: Add Dispatcher class for fiber-aware work routing`
+
+### 2.1b Wire Dispatcher into threaded server (deadlock fix)
+
+**Red.** Test (in `test/test_wrapper.rb`): `threads: 2`, depth-3 re-entrant
+call (analogous to the sequential test from 1.2), completes within 2s.
+Currently deadlocks (all worker threads blocked on temp reply ports).
+
+**Green.** Replace threaded-mode plumbing with `Dispatcher`.
+
+- Remove `@queue` (the existing `::Thread::Queue`). Add `@dispatcher =
+  Dispatcher.new(threads)` in `Server#initialize` for threaded mode.
+- Rewrite `worker_thread` (rename to `worker_loop` per design naming).
+  Per-worker local state: `pending = {}` (fiber_id → fiber), `stopping =
+  false`. Loop:
+  ```
+  loop do
+    break if stopping && pending.empty?
+    case @dispatcher.dequeue(worker_num, accept_calls: !stopping)
+    in [:call, message]
+      start a new fiber for this CallMessage (see start_method_fiber);
+      register fiber_id with @dispatcher; on completion unregister.
+    in [:resume, message]
+      look up fiber in pending; resume with message; on completion
+      delete from pending and unregister with @dispatcher.
+    in [:closed, nil]
+      stopping = true
+    end
+  end
+  ```
+  Each worker still sends `WorkerStoppedMessage` on exit (existing
+  pattern preserved).
+- Make `make_block` use the fiber path in threaded mode too. Remove the
+  `use_fiber_path = !@threads_requested` gate from step 1.3 — replace
+  with unconditional `use_fiber_path = true`. The hybrid fiber-current
+  check from 1.3 still applies.
+- Update `Server#main_loop` threaded dispatch:
+    - `CallMessage` → `@dispatcher.enqueue_call(message)`. (Shouldn't
+      fail in the running phase, but if it returns false, refuse.)
+    - `FiberReturnMessage`/`FiberExceptionMessage` →
+      `@dispatcher.enqueue_fiber_resume(message)`. If it returns false
+      (fiber not registered), log and discard.
+- `start_method_fiber` becomes per-worker (called from inside
+  `worker_loop` rather than from `main_loop`). The sequential branch of
+  `main_loop` still calls it directly.
 
 **Commit:** `feat: Multi-queue fiber dispatch in threaded mode`
 
 ### 2.2 Graceful stop with suspended fibers (threaded)
 
-**Red.** Test: same shape as 1.5 but with `threads: 2`.
+**Red.** Test: same shape as 1.5 but with `threads: 2`. (Block holds a latch;
+test calls `async_stop`; new call refused with `StoppedError`; latch released;
+original call returns its value.)
 
-**Green.** On `StopMessage`, enqueue `nil` sentinel to all per-worker queues.
-Workers receiving `nil` re-enqueue the sentinel and continue if their local
-`pending` is non-empty; once empty, they exit normally and send
-`WorkerStoppedMessage`. Main loop continues routing `BlockReturn`/
-`BlockException` to per-worker queues during the stopping phase. Refuse new
-`CallMessage`s with `StoppedError`.
+**Green.** On `StopMessage` in threaded mode, call `@dispatcher.close` and
+replace the existing `stop_workers` body (which closed `@queue`) with a
+threaded-stopping phase. The per-worker logic from 2.1b already handles the
+`[:closed, nil]` signal: each worker sets `stopping = true` and only exits
+once its local `pending` is empty. The main loop continues routing
+`FiberReturnMessage`/`FiberExceptionMessage` to per-worker queues during the
+stopping phase via `@dispatcher.enqueue_fiber_resume`. New `CallMessage`s
+arriving during stopping are refused via `refuse_method` (the main-loop
+stopping phase already does this in current code; keep that behavior).
 
 **Commit:** `feat: Drain pending fibers during graceful stop (threaded mode)`
 
 ### 2.3 Concurrent callers with re-entrant blocks
 
-**Red.** Test: multiple Ractors simultaneously call methods-with-blocks that
-re-enter the wrapper (`threads: 2`). All complete with correct results.
+**Red.** Test: multiple threads in the test process simultaneously call
+methods-with-blocks that re-enter the wrapper (`threads: 2`). All complete
+with correct results within 5s.
 
-No production code change expected after 2.1/2.2; this is contention coverage.
+No production code change expected after 2.1b/2.2; this is contention
+coverage. Validates that `Dispatcher` correctly serializes shared-queue
+access and per-worker dispatch under concurrent load.
 
 **Commit:** `test: Cover concurrent re-entrant calls in threaded mode` (only
-if changes were needed)
+if changes were needed; otherwise fold the test into 2.2's commit)
 
 ### 2.4 Worker thread crash with pending fibers
 
-**Red.** Test: arrange for a worker to crash (e.g., wrap an object whose method
-does something that explodes inside the fiber) while another fiber on the same
+**Red.** Test: arrange for a worker to crash (e.g., wrap an object whose
+method explodes after the block has yielded) while another fiber on the same
 worker is suspended; verify the suspended fiber's caller receives
 `CrashedError`.
 
-**Green.** Worker `ensure` block calls `abort_pending_fibers(pending)` before
-sending `WorkerStoppedMessage`. Each aborted fiber's own rescue chain sends an
-`ExceptionMessage` to its `reply_port`.
+**Green.** In `worker_loop`'s `ensure` block, before sending
+`WorkerStoppedMessage`:
+1. Capture a `CrashedError` describing the worker's failure.
+2. Call `abort_pending_fibers(pending, error)` (the helper already exists
+   from step 1.6 — reuse it).
+3. Unregister each aborted fiber from `@dispatcher`.
+
+Each aborted fiber's existing `handle_method` rescue chain sends the
+exception to its own `reply_port`.
 
 **Commit:** `feat: Abort fibers in crashed worker thread`
 
 ### 2.5 Main-thread force-terminate after worker crash
 
-**Red.** Test: main loop receives unexpected `WorkerStoppedMessage` while
+**Red.** Test: main loop receives an unexpected `WorkerStoppedMessage` while
 other workers have suspended fibers; those fibers' callers should receive
 `CrashedError`.
 
-**Green.** Extend `crash_cleanup` (threaded branch) so that when forcing
-termination of remaining workers, their pending fibers are also aborted (most
-naturally: workers' own ensure blocks already do this when their threads exit;
-verify the path triggers correctly when main signals shutdown via
-`@multi_queue_cond` cascade or queue closure).
+**Green.** Extend `crash_cleanup` (threaded branch) to call
+`@dispatcher.close` so that all remaining workers are woken with
+`[:closed, nil]`. Each worker enters draining state; if its `pending` is
+empty it exits cleanly, otherwise its own `ensure` block (from 2.4) aborts
+its remaining fibers. `crash_cleanup` then `join`s the worker threads via
+`join_workers_after_crash` (existing helper).
+
+If any registered fibers remain (because their owning worker died without
+draining — should not happen normally, but defensively): also call
+`abort_pending_fibers` on any fibers still tracked by main-side state. The
+implementer should check whether the design needs main-side fiber tracking
+in addition to per-worker tracking; if every fiber is owned by exactly one
+worker and that worker handles its own cleanup, no main-side abort is
+needed.
 
 **Commit:** `feat: Force-terminate remaining fibers on worker crash`
 
