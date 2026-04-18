@@ -972,6 +972,7 @@ class Ractor
       #
       class Dispatcher
         CLOSED = [:closed, nil].freeze
+        TERMINATE = [:terminate, nil].freeze
 
         ##
         # @param num_workers [Integer] number of per-worker queues to allocate.
@@ -984,6 +985,7 @@ class Ractor
           @worker_queues = ::Array.new(num_workers) { [] }
           @fiber_to_worker = {}
           @closed = false
+          @crashed = false
           @closed_notified = ::Array.new(num_workers, false)
         end
 
@@ -1030,8 +1032,14 @@ class Ractor
         #    can transition to a draining state. Subsequent calls behave
         #    normally and may block again.
         #
+        # If `crash_close` has been called, returns `TERMINATE`
+        # (`[:terminate, nil]`) immediately whenever the per-worker queue is
+        # empty — signaling the worker to exit even if it has pending fibers.
+        # The per-worker queue is still drained first so any in-flight resumes
+        # complete normally.
+        #
         # @return [Array(Symbol, Object)] one of `[:resume, msg]`,
-        #   `[:call, msg]`, or `CLOSED`.
+        #   `[:call, msg]`, `CLOSED`, or `TERMINATE`.
         #
         def dequeue(worker_num, accept_calls:)
           @mutex.synchronize do
@@ -1039,6 +1047,7 @@ class Ractor
               if (msg = @worker_queues[worker_num].shift)
                 return [:resume, msg]
               end
+              return TERMINATE if @crashed
               if accept_calls && !@closed && (msg = @shared_queue.shift)
                 return [:call, msg]
               end
@@ -1078,6 +1087,27 @@ class Ractor
             return [] if @closed
             @closed = true
             drained = @shared_queue.dup
+            @shared_queue.clear
+            @cond.broadcast
+            drained
+          end
+        end
+
+        ##
+        # Mark closed AND crashed: future `dequeue` calls return `TERMINATE`
+        # whenever the per-worker queue is empty (rather than blocking),
+        # signaling workers to exit immediately so their `ensure` blocks can
+        # abort any pending fibers. Used on server crash, where no further
+        # fiber-resume messages will arrive. Idempotent (sets crashed even if
+        # already closed). Returns the drained shared queue.
+        # @return [Array] the messages that were in the shared queue.
+        #
+        def crash_close
+          @mutex.synchronize do
+            already_closed = @closed
+            @closed = true
+            @crashed = true
+            drained = already_closed ? [] : @shared_queue.dup
             @shared_queue.clear
             @cond.broadcast
             drained
@@ -1433,7 +1463,7 @@ class Ractor
       # ensure blocks.
       #
       def drain_dispatcher_after_crash(dispatcher, error)
-        dispatcher.close.each do |message|
+        dispatcher.crash_close.each do |message|
           message.reply_port.send(ExceptionMessage.new(error))
         rescue ::Ractor::Error
           maybe_log("Failed to send crash error to queued caller", call_message: message)
@@ -1499,20 +1529,39 @@ class Ractor
       def worker_loop(worker_num)
         maybe_log("Worker starting", worker_num: worker_num)
         pending = {}
+        run_worker_dispatch_loop(worker_num, pending)
+      ensure
+        cleanup_worker(worker_num, pending)
+      end
+
+      ##
+      # The dispatch loop body for a worker thread. Loops on
+      # `@dispatcher.dequeue` and routes each result to the appropriate
+      # handler. Exits when the dispatcher signals termination, or when a
+      # graceful close has been observed and the local pending hash is empty.
+      #
+      def run_worker_dispatch_loop(worker_num, pending)
         stopping = false
-        until stopping && pending.empty?
+        loop do
           maybe_log("Waiting for work", worker_num: worker_num)
           kind, message = @dispatcher.dequeue(worker_num, accept_calls: !stopping)
           case kind
-          when :call
-            start_worker_fiber(message, pending, worker_num)
-          when :resume
-            resume_worker_fiber(message, pending)
-          when :closed
-            stopping = true
+          when :call then start_worker_fiber(message, pending, worker_num)
+          when :resume then resume_worker_fiber(message, pending)
+          when :closed then stopping = true
+          when :terminate then return
           end
+          return if stopping && pending.empty?
         end
-      ensure
+      end
+
+      ##
+      # Worker-thread cleanup: aborts any pending fibers (so their callers
+      # observe `CrashedError`) and reports the worker's stop to the main
+      # loop. Always runs in the worker's ensure block — both for normal exit
+      # and for crash exit.
+      #
+      def cleanup_worker(worker_num, pending)
         maybe_log("Worker stopping", worker_num: worker_num)
         if pending && !pending.empty?
           error = CrashedError.new("Worker #{worker_num} crashed")

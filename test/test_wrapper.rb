@@ -805,6 +805,37 @@ describe ::Ractor::Wrapper do
           @wrapper = nil
         end
 
+        it "raises CrashedError when the server crashes with fibers suspended in workers" do
+          capture_subprocess_io do
+            @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+            stub = @wrapper.stub
+            latch = ::Queue.new
+            result_holder = ::Queue.new
+            threads = ::Array.new(2) do |i|
+              ::Thread.new do
+                stub.each_item([i]) do |item|
+                  latch.pop
+                  item
+                end
+              rescue ::Exception => e # rubocop:disable Lint/RescueException
+                result_holder << e
+              end
+            end
+            with_timeout(2) { sleep 0.01 until latch.num_waiting == 2 }
+            crash_port = ::Ractor::Port.new
+            @wrapper.instance_variable_get(:@port).send(CrashingJoinMessage.new(crash_port))
+            sleep 0.1
+            2.times { latch.push(:go) }
+            threads.each { |t| assert(t.join(2), "caller thread should complete after crash") }
+            errors = []
+            errors << result_holder.pop until result_holder.empty?
+            assert_equal(2, errors.size)
+            errors.each { |e| assert_instance_of(::Ractor::Wrapper::CrashedError, e) }
+            with_timeout(2) { @wrapper.join }
+            @wrapper = nil
+          end
+        end
+
         it "raises CrashedError when a worker thread crashes with a fiber suspended" do
           skip "requires local mode to reach the worker thread" unless wrapper_config[:opts][:use_current_ractor]
           capture_subprocess_io do

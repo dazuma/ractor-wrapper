@@ -157,6 +157,56 @@ describe ::Ractor::Wrapper::Server::Dispatcher do
     end
   end
 
+  describe "crash_close" do
+    it "wakes a blocked worker with a terminate signal even with no pending resume" do
+      thread = ::Thread.new { dispatcher.dequeue(0, accept_calls: false) }
+      sleep 0.1
+      assert(thread.alive?, "worker should be blocked")
+      dispatcher.crash_close
+      with_timeout(2) { thread.join }
+      assert_equal([:terminate, nil], thread.value)
+    end
+
+    it "drains the per-worker queue before returning terminate" do
+      dispatcher.register_fiber(7, 0)
+      dispatcher.enqueue_fiber_resume(FiberResume.new(fiber_id: 7, payload: :first))
+      dispatcher.crash_close
+      assert_equal([:resume, FiberResume.new(fiber_id: 7, payload: :first)],
+                   dispatcher.dequeue(0, accept_calls: false))
+      assert_equal([:terminate, nil], dispatcher.dequeue(0, accept_calls: false))
+    end
+
+    it "returns terminate repeatedly (not just once)" do
+      dispatcher.crash_close
+      assert_equal([:terminate, nil], dispatcher.dequeue(0, accept_calls: false))
+      assert_equal([:terminate, nil], dispatcher.dequeue(0, accept_calls: false))
+    end
+
+    it "drains the shared queue and returns its contents on first crash_close" do
+      dispatcher.enqueue_call(:a)
+      dispatcher.enqueue_call(:b)
+      drained = dispatcher.crash_close
+      assert_equal([:a, :b], drained)
+    end
+
+    it "rejects further enqueue_call after crash_close" do
+      dispatcher.crash_close
+      assert_equal(false, dispatcher.enqueue_call(:nope))
+    end
+
+    it "after crash_close, a worker that already saw closed gets terminate next" do
+      dispatcher.close
+      assert_equal([:closed, nil], dispatcher.dequeue(0, accept_calls: false))
+      dispatcher.crash_close
+      assert_equal([:terminate, nil], dispatcher.dequeue(0, accept_calls: false))
+    end
+
+    it "is idempotent and returns empty drain on subsequent calls" do
+      dispatcher.crash_close
+      assert_equal([], dispatcher.crash_close)
+    end
+  end
+
   describe "concurrency stress" do
     it "delivers every enqueued call to exactly one worker across producers" do
       d = ::Ractor::Wrapper::Server::Dispatcher.new(4)
