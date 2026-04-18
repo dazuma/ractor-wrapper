@@ -887,6 +887,75 @@ describe ::Ractor::Wrapper do
           end
         end
       end
+
+      describe "functional coverage in fiber path (#{wrapper_config[:desc]})" do
+        let(:base_opts) { wrapper_config[:opts] }
+
+        before { @wrapper = nil }
+        after { bounded_cleanup(@wrapper) if @wrapper }
+
+        it "passes block return values back through fiber suspend/resume" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          collected = []
+          stub.each_item([1, 2, 3]) { |n| collected << (n * 10) }
+          assert_equal([10, 20, 30], collected)
+        end
+
+        it "propagates an exception raised in the block back through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          attempts = 0
+          assert_raises(::RuntimeError, "block boom") do
+            stub.each_item([1, 2, 3]) do |_n| # rubocop:disable Lint/UnreachableLoop
+              attempts += 1
+              raise "block boom"
+            end
+          end
+          assert_equal(1, attempts)
+        end
+
+        it "supports many yields from one method, each with a re-entrant call" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          collected = []
+          stub.each_item((1..5).to_a) { |n| collected << stub.echo_args(n) }
+          assert_equal((1..5).map { |n| "[#{n}], {}" }, collected)
+        end
+
+        it "preserves move semantics for block arguments through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts) do |config|
+            config.configure_method(:run_block_with_id, block_arguments: :move)
+          end
+          stub = @wrapper.stub
+          arg_id, server_side_id = stub.run_block_with_id("hello".dup) do |str, str_id|
+            [str.object_id, str_id]
+          end
+          assert_equal(server_side_id, arg_id)
+        end
+
+        it "moves block results back into the server through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts) do |config|
+            config.configure_method(:run_block, block_results: :move)
+          end
+          stub = @wrapper.stub
+          returned = "ignored"
+          stub.run_block do
+            returned = "result".dup
+            returned
+          end
+          assert_raises(::Ractor::MovedError) { returned.to_s }
+        end
+
+        it "runs a wrapped-environment shareable block without going through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, block_environment: :wrapped, **base_opts)
+          stub = @wrapper.stub
+          result = stub.run_block(1, 2, a: "b", c: "d") do |one, two, a:, c:|
+            "result #{one} #{two} #{a} #{c}"
+          end
+          assert_equal("result 1 2 b d", result)
+        end
+      end
     end
   end
 end
