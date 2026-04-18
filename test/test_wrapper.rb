@@ -694,6 +694,20 @@ describe ::Ractor::Wrapper do
           end
           assert_equal(["X", "Y"], results)
         end
+
+        # Documents an unchanged limitation: when a block is invoked from a
+        # non-method-handling fiber (here, an Enumerator generator), the proxy
+        # proc falls back to the blocking path. A re-entrant wrapper call from
+        # inside that block then deadlocks the server.
+        it "still deadlocks when an Enumerator-invoked block re-enters the wrapper" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          assert_raises(::Minitest::Assertion) do
+            with_timeout(1) do
+              stub.each_via_generator(["a", "b"]) { |item| stub.echo_args(item) }
+            end
+          end
+        end
       end
     end
   end
