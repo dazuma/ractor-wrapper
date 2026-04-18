@@ -1223,6 +1223,7 @@ class Ractor
         # `@queue` should not be nil in threaded mode, but we're checking
         # anyway just in case a crash happened during setup
         drain_queue_after_crash(@queue, error) if @threads_requested && @queue
+        abort_pending_fibers(@pending_fibers, error) if !@threads_requested && @pending_fibers
         drain_inbox_after_crash(@port, error)
         # `@active_workers` should not be nil in threaded mode, but we're
         # checking anyway just in case a crash happened during setup
@@ -1230,6 +1231,22 @@ class Ractor
         @join_requests.each { |port| send_join_reply(port) }
       rescue ::Exception => e # rubocop:disable Lint/RescueException
         maybe_log("Suppressed exception during crash_cleanup: #{e.message} (#{e.class})")
+      end
+
+      ##
+      # After a crash, raises +error+ inside each suspended method-handling
+      # fiber. The exception emerges from the fiber's `Fiber.yield` call and is
+      # caught by `handle_method`'s rescue chain, which sends an
+      # `ExceptionMessage` to the fiber's reply_port so the caller observes a
+      # `CrashedError`.
+      #
+      def abort_pending_fibers(pending_fibers, error)
+        pending_fibers.each_value do |fiber|
+          fiber.raise(error)
+        rescue ::Exception => e # rubocop:disable Lint/RescueException
+          maybe_log("Suppressed exception during abort_pending_fibers: #{e.message} (#{e.class})")
+        end
+        pending_fibers.clear
       end
 
       ##

@@ -695,6 +695,32 @@ describe ::Ractor::Wrapper do
           assert_equal(["X", "Y"], results)
         end
 
+        it "raises CrashedError when the server crashes with a fiber suspended" do
+          capture_subprocess_io do
+            @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+            stub = @wrapper.stub
+            latch = ::Queue.new
+            result_holder = []
+            call_thread = ::Thread.new do
+              stub.each_item(["a"]) do |item|
+                latch.pop
+                item.upcase
+              end
+            rescue ::Exception => e # rubocop:disable Lint/RescueException
+              result_holder << e
+            end
+            with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+            crash_port = ::Ractor::Port.new
+            @wrapper.instance_variable_get(:@port).send(CrashingJoinMessage.new(crash_port))
+            sleep 0.1
+            latch.push(:go)
+            assert(call_thread.join(2), "call thread should complete after crash")
+            assert_instance_of(::Ractor::Wrapper::CrashedError, result_holder.first)
+            with_timeout(2) { @wrapper.join }
+            @wrapper = nil
+          end
+        end
+
         it "drains a suspended fiber when stopped during a block" do
           @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
           stub = @wrapper.stub
