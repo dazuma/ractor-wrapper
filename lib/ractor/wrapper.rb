@@ -955,6 +955,138 @@ class Ractor
     class Server
       ##
       # @private
+      #
+      # Multi-queue work dispatcher for the threaded server. Routes new
+      # `CallMessage`s through a shared queue (any worker may pick them up)
+      # and routes fiber resumes (`FiberReturnMessage` / `FiberExceptionMessage`)
+      # through per-worker queues so a suspended fiber is always resumed by
+      # the same worker thread that started it (Ruby fibers cannot be resumed
+      # from a different thread than their last resumer).
+      #
+      # All public methods are thread-safe. The internal mutex guards the
+      # shared queue, all per-worker queues, the fiber→worker map, and the
+      # closed/notified state. `dequeue` blocks on a single shared
+      # `ConditionVariable`; producers `broadcast` rather than `signal` so
+      # workers waiting on per-worker queues are not starved by
+      # shared-queue activity.
+      #
+      class Dispatcher
+        CLOSED = [:closed, nil].freeze
+
+        ##
+        # @param num_workers [Integer] number of per-worker queues to allocate.
+        #   Workers are addressed by integers in the range `[0, num_workers)`.
+        #
+        def initialize(num_workers)
+          @mutex = ::Mutex.new
+          @cond = ::ConditionVariable.new
+          @shared_queue = []
+          @worker_queues = ::Array.new(num_workers) { [] }
+          @fiber_to_worker = {}
+          @closed = false
+          @closed_notified = ::Array.new(num_workers, false)
+        end
+
+        ##
+        # Push a new `CallMessage` onto the shared queue.
+        # @return [Boolean] `true` normally, `false` if `close` has been called.
+        #
+        def enqueue_call(message)
+          @mutex.synchronize do
+            return false if @closed
+            @shared_queue.push(message)
+            @cond.broadcast
+            true
+          end
+        end
+
+        ##
+        # Push a fiber-resume message (`FiberReturnMessage` /
+        # `FiberExceptionMessage`) onto the queue of the worker that owns the
+        # fiber identified by `message.fiber_id`.
+        # @return [Boolean] `true` if dispatched, `false` if the fiber_id is
+        #   not registered (e.g. fiber already finished or was aborted).
+        #
+        def enqueue_fiber_resume(message)
+          @mutex.synchronize do
+            worker_num = @fiber_to_worker[message.fiber_id]
+            return false unless worker_num
+            @worker_queues[worker_num].push(message)
+            @cond.broadcast
+            true
+          end
+        end
+
+        ##
+        # Block until the worker has work. Priority order:
+        #
+        # 1. Per-worker queue (always — these are resumes for fibers this
+        #    worker owns; they must be drained even after close).
+        # 2. Shared queue, but only if `accept_calls` is true and the
+        #    dispatcher is not yet closed.
+        # 3. The `CLOSED` sentinel (`[:closed, nil]`), returned exactly once
+        #    per worker, the first time the worker would otherwise have
+        #    blocked after `close` was called. Used to wake the worker so it
+        #    can transition to a draining state. Subsequent calls behave
+        #    normally and may block again.
+        #
+        # @return [Array(Symbol, Object)] one of `[:resume, msg]`,
+        #   `[:call, msg]`, or `CLOSED`.
+        #
+        def dequeue(worker_num, accept_calls:)
+          @mutex.synchronize do
+            loop do
+              if (msg = @worker_queues[worker_num].shift)
+                return [:resume, msg]
+              end
+              if accept_calls && !@closed && (msg = @shared_queue.shift)
+                return [:call, msg]
+              end
+              if @closed && !@closed_notified[worker_num]
+                @closed_notified[worker_num] = true
+                return CLOSED
+              end
+              @cond.wait(@mutex)
+            end
+          end
+        end
+
+        ##
+        # Atomically associate `fiber_id` with `worker_num` so subsequent
+        # `enqueue_fiber_resume` calls land on the right worker queue.
+        #
+        def register_fiber(fiber_id, worker_num)
+          @mutex.synchronize { @fiber_to_worker[fiber_id] = worker_num }
+        end
+
+        ##
+        # Remove the fiber→worker mapping. Idempotent.
+        #
+        def unregister_fiber(fiber_id)
+          @mutex.synchronize { @fiber_to_worker.delete(fiber_id) }
+        end
+
+        ##
+        # Mark closed and wake all blocked workers. Drains the shared queue
+        # and returns its previous contents so the caller can refuse them
+        # (with `StoppedError`) on behalf of their pending callers. Idempotent
+        # — repeated calls return `[]`.
+        # @return [Array] the messages that were in the shared queue.
+        #
+        def close
+          @mutex.synchronize do
+            return [] if @closed
+            @closed = true
+            drained = @shared_queue.dup
+            @shared_queue.clear
+            @cond.broadcast
+            drained
+          end
+        end
+      end
+
+      ##
+      # @private
       # Create and run a server hosted in the current Ractor
       #
       def self.run_local(object:, stub:, port:, name:, enable_logging: false, threads: 0)
