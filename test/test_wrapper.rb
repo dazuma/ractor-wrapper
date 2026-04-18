@@ -695,6 +695,29 @@ describe ::Ractor::Wrapper do
           assert_equal(["X", "Y"], results)
         end
 
+        it "drains a suspended fiber when stopped during a block" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          latch = ::Queue.new
+          result_holder = []
+          call_thread = ::Thread.new do
+            result_holder << stub.each_item(["a"]) do |item|
+              latch.pop
+              item.upcase
+            end
+          end
+          with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+          @wrapper.async_stop
+          with_timeout(2) do
+            assert_raises(::Ractor::Wrapper::StoppedError) { stub.echo_args("nope") }
+          end
+          latch.push(:go)
+          assert(call_thread.join(2), "call thread should complete after latch released")
+          assert_equal([["a"]], result_holder)
+          with_timeout(2) { @wrapper.join }
+          @wrapper = nil
+        end
+
         # Documents an unchanged limitation: when a block is invoked from a
         # non-method-handling fiber (here, an Enumerator generator), the proxy
         # proc falls back to the blocking path. A re-entrant wrapper call from

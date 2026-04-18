@@ -1077,7 +1077,33 @@ class Ractor
             break
           when StopMessage
             maybe_log("Received stop")
+            drain_pending_fibers unless @threads_requested
             break
+          when JoinMessage
+            maybe_log("Received and queueing join request")
+            @join_requests << message.reply_port
+          end
+        end
+      end
+
+      ##
+      # Sequential-mode stopping phase. After receiving a StopMessage, continue
+      # accepting fiber-result messages (and join requests) so that any
+      # currently-suspended method-handling fiber can complete. New
+      # `CallMessage`s are refused with `StoppedError`. Returns once
+      # `@pending_fibers` is empty.
+      #
+      def drain_pending_fibers
+        until @pending_fibers.empty?
+          maybe_log("Waiting for pending fibers to complete")
+          message = @port.receive
+          case message
+          when CallMessage
+            refuse_method(message)
+          when FiberReturnMessage, FiberExceptionMessage
+            resume_method_fiber(message)
+          when StopMessage
+            maybe_log("Stop received when already stopping")
           when JoinMessage
             maybe_log("Received and queueing join request")
             @join_requests << message.reply_port
