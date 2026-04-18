@@ -805,6 +805,34 @@ describe ::Ractor::Wrapper do
           @wrapper = nil
         end
 
+        it "raises CrashedError when a worker thread crashes with a fiber suspended" do
+          skip "requires local mode to reach the worker thread" unless wrapper_config[:opts][:use_current_ractor]
+          capture_subprocess_io do
+            @wrapper = ::Ractor::Wrapper.new(remote, threads: 1, **wrapper_config[:opts])
+            stub = @wrapper.stub
+            latch = ::Queue.new
+            result_holder = []
+            call_thread = ::Thread.new do
+              stub.each_item(["a"]) do |item|
+                latch.pop
+                item.upcase
+              end
+            rescue ::Exception => e # rubocop:disable Lint/RescueException
+              result_holder << e
+            end
+            with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+            worker = ::Thread.list.find { |t| t.name&.include?(":worker:") }
+            assert(worker, "expected to find a named worker thread")
+            worker.raise(::RuntimeError.new("simulated worker crash"))
+            sleep 0.1
+            latch.push(:go)
+            assert(call_thread.join(2), "call thread should complete after worker crash")
+            assert_instance_of(::Ractor::Wrapper::CrashedError, result_holder.first)
+            with_timeout(2) { @wrapper.join }
+            @wrapper = nil
+          end
+        end
+
         it "handles concurrent callers making re-entrant block calls" do
           @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
           stub = @wrapper.stub

@@ -1167,7 +1167,10 @@ class Ractor
         @dispatcher = Dispatcher.new(@threads_requested)
         @active_workers = {}
         (0...@threads_requested).each do |worker_num|
-          @active_workers[worker_num] = ::Thread.new { worker_loop(worker_num) }
+          @active_workers[worker_num] = ::Thread.new do
+            ::Thread.current.name = "ractor-wrapper:#{@name}:worker:#{worker_num}"
+            worker_loop(worker_num)
+          end
         end
       end
 
@@ -1511,6 +1514,11 @@ class Ractor
         end
       ensure
         maybe_log("Worker stopping", worker_num: worker_num)
+        if pending && !pending.empty?
+          error = CrashedError.new("Worker #{worker_num} crashed")
+          pending.each_key { |fiber_id| @dispatcher.unregister_fiber(fiber_id) }
+          abort_pending_fibers(pending, error)
+        end
         begin
           @port.send(WorkerStoppedMessage.new(worker_num))
         rescue ::Ractor::ClosedError
