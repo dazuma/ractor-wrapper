@@ -804,6 +804,29 @@ describe ::Ractor::Wrapper do
           with_timeout(2) { @wrapper.join }
           @wrapper = nil
         end
+
+        it "handles concurrent callers making re-entrant block calls" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          caller_count = 4
+          per_caller = [1, 2, 3]
+          results = ::Array.new(caller_count)
+          threads = ::Array.new(caller_count) do |caller_num|
+            ::Thread.new do
+              collected = []
+              stub.each_item(per_caller) do |item|
+                collected << stub.echo_args((caller_num * 100) + item)
+              end
+              results[caller_num] = collected
+            end
+          end
+          with_timeout(5) { threads.each(&:join) }
+          assert_equal(caller_count, results.size)
+          results.each_with_index do |collected, caller_num|
+            expected = per_caller.map { |item| "[#{(caller_num * 100) + item}], {}" }
+            assert_equal(expected, collected, "results for caller #{caller_num}")
+          end
+        end
       end
     end
   end
