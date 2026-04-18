@@ -781,6 +781,29 @@ describe ::Ractor::Wrapper do
           end
           assert_equal(["[111], {}", "[121], {}", "[112], {}", "[122], {}"], results)
         end
+
+        it "drains a suspended fiber when stopped during a block" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          latch = ::Queue.new
+          result_holder = []
+          call_thread = ::Thread.new do
+            result_holder << stub.each_item(["a"]) do |item|
+              latch.pop
+              item.upcase
+            end
+          end
+          with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+          @wrapper.async_stop
+          with_timeout(2) do
+            assert_raises(::Ractor::Wrapper::StoppedError) { stub.echo_args("nope") }
+          end
+          latch.push(:go)
+          assert(call_thread.join(2), "call thread should complete after latch released")
+          assert_equal([["a"]], result_holder)
+          with_timeout(2) { @wrapper.join }
+          @wrapper = nil
+        end
       end
     end
   end
