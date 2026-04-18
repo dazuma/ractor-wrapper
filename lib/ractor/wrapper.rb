@@ -1272,9 +1272,10 @@ class Ractor
       # or aborted by a crashed worker).
       #
       def dispatch_fiber_resume(message)
+        maybe_log("Routing fiber resume", fiber_id: message.fiber_id)
         if @threads_requested
           return if @dispatcher.enqueue_fiber_resume(message)
-          maybe_log("Discarding orphan fiber resume for #{message.fiber_id}")
+          maybe_log("Discarding orphan fiber resume", fiber_id: message.fiber_id)
         else
           resume_method_fiber(message)
         end
@@ -1316,6 +1317,7 @@ class Ractor
         fiber = ::Fiber.new { handle_method(message) }
         fiber_id = fiber.object_id
         @pending_fibers[fiber_id] = fiber
+        maybe_log("Starting method fiber", call_message: message, fiber_id: fiber_id)
         fiber.resume
         @pending_fibers.delete(fiber_id) unless fiber.alive?
       end
@@ -1328,6 +1330,7 @@ class Ractor
       def resume_method_fiber(message)
         fiber = @pending_fibers[message.fiber_id]
         return unless fiber
+        maybe_log("Resuming method fiber", fiber_id: message.fiber_id)
         fiber.resume(message)
         @pending_fibers.delete(message.fiber_id) unless fiber.alive?
       end
@@ -1447,10 +1450,12 @@ class Ractor
       # `CrashedError`.
       #
       def abort_pending_fibers(pending_fibers, error)
-        pending_fibers.each_value do |fiber|
+        pending_fibers.each_pair do |fiber_id, fiber|
+          maybe_log("Aborting suspended fiber", fiber_id: fiber_id)
           fiber.raise(error)
         rescue ::Exception => e # rubocop:disable Lint/RescueException
-          maybe_log("Suppressed exception during abort_pending_fibers: #{e.message} (#{e.class})")
+          maybe_log("Suppressed exception during abort_pending_fibers: #{e.message} (#{e.class})",
+                    fiber_id: fiber_id)
         end
         pending_fibers.clear
       end
@@ -1586,6 +1591,7 @@ class Ractor
         fiber_id = fiber.object_id
         pending[fiber_id] = fiber
         @dispatcher.register_fiber(fiber_id, worker_num)
+        maybe_log("Starting worker fiber", call_message: message, worker_num: worker_num, fiber_id: fiber_id)
         fiber.resume
         return if fiber.alive?
         pending.delete(fiber_id)
@@ -1601,6 +1607,7 @@ class Ractor
       def resume_worker_fiber(message, pending)
         fiber = pending[message.fiber_id]
         return unless fiber
+        maybe_log("Resuming worker fiber", fiber_id: message.fiber_id)
         fiber.resume(message)
         return if fiber.alive?
         pending.delete(message.fiber_id)
@@ -1683,8 +1690,10 @@ class Ractor
       def fiber_yield_block(message, args, kwargs)
         fiber_id = ::Fiber.current.object_id
         yield_message = FiberYieldMessage.new(args: args, kwargs: kwargs, fiber_id: fiber_id)
+        maybe_log("Yielding to caller-side block", call_message: message, fiber_id: fiber_id)
         message.reply_port.send(yield_message, move: message.settings.block_arguments == :move)
         reply = ::Fiber.yield
+        maybe_log("Resumed after block reply", call_message: message, fiber_id: fiber_id)
         case reply
         when FiberExceptionMessage
           raise reply.exception
@@ -1743,12 +1752,14 @@ class Ractor
       ##
       # Print out a log message
       #
-      def maybe_log(str, call_message: nil, worker_num: nil, transaction: nil, method_name: nil)
+      def maybe_log(str, call_message: nil, worker_num: nil, fiber_id: nil,
+                    transaction: nil, method_name: nil)
         return unless @enable_logging
         transaction ||= call_message&.transaction
         method_name ||= call_message&.method_name
         metadata = [::Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.%L"), "Ractor::Wrapper:#{@name}"]
         metadata << "Worker:#{worker_num}" if worker_num
+        metadata << "Fiber:#{fiber_id}" if fiber_id
         metadata << "Transaction:#{transaction}" if transaction
         metadata << "Method:#{method_name}" if method_name
         metadata = metadata.join(" ")
