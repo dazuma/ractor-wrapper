@@ -830,7 +830,10 @@ describe ::Ractor::Wrapper do
             errors = []
             errors << result_holder.pop until result_holder.empty?
             assert_equal(2, errors.size)
-            errors.each { |e| assert_instance_of(::Ractor::Wrapper::CrashedError, e) }
+            errors.each do |e|
+              assert_instance_of(::Ractor::Wrapper::CrashedError, e)
+              assert_match(/terminated/, e.message)
+            end
             with_timeout(2) { @wrapper.join }
             @wrapper = nil
           end

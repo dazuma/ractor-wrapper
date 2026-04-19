@@ -1599,8 +1599,12 @@ class Ractor
       def cleanup_worker(worker_num, pending, crash_exception = nil)
         maybe_log("Worker stopping", worker_num: worker_num)
         if pending && !pending.empty?
-          message = "Worker #{worker_num} crashed"
-          message += ": #{crash_exception.message} (#{crash_exception.class})" if crash_exception
+          message =
+            if crash_exception
+              "Worker #{worker_num} crashed: #{crash_exception.message} (#{crash_exception.class})"
+            else
+              "Worker #{worker_num} terminated"
+            end
           error = CrashedError.new(message)
           pending.each_key { |fiber_id| @dispatcher.unregister_fiber(fiber_id) }
           abort_pending_fibers(pending, error)
