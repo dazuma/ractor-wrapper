@@ -1558,9 +1558,15 @@ class Ractor
       def worker_loop(worker_num)
         maybe_log("Worker starting", worker_num: worker_num)
         pending = {}
-        run_worker_dispatch_loop(worker_num, pending)
-      ensure
-        cleanup_worker(worker_num, pending)
+        crash_exception = nil
+        begin
+          run_worker_dispatch_loop(worker_num, pending)
+        rescue ::Exception => e # rubocop:disable Lint/RescueException
+          crash_exception = e
+          raise
+        ensure
+          cleanup_worker(worker_num, pending, crash_exception)
+        end
       end
 
       ##
@@ -1590,10 +1596,12 @@ class Ractor
       # loop. Always runs in the worker's ensure block — both for normal exit
       # and for crash exit.
       #
-      def cleanup_worker(worker_num, pending)
+      def cleanup_worker(worker_num, pending, crash_exception = nil)
         maybe_log("Worker stopping", worker_num: worker_num)
         if pending && !pending.empty?
-          error = CrashedError.new("Worker #{worker_num} crashed")
+          message = "Worker #{worker_num} crashed"
+          message += ": #{crash_exception.message} (#{crash_exception.class})" if crash_exception
+          error = CrashedError.new(message)
           pending.each_key { |fiber_id| @dispatcher.unregister_fiber(fiber_id) }
           abort_pending_fibers(pending, error)
         end

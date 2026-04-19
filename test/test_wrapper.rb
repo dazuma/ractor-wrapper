@@ -859,6 +859,8 @@ describe ::Ractor::Wrapper do
             latch.push(:go)
             assert(call_thread.join(2), "call thread should complete after worker crash")
             assert_instance_of(::Ractor::Wrapper::CrashedError, result_holder.first)
+            assert_match(/simulated worker crash/, result_holder.first.message)
+            assert_match(/RuntimeError/, result_holder.first.message)
             with_timeout(2) { @wrapper.join }
             @wrapper = nil
           end
