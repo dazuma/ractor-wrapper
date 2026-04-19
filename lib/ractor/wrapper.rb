@@ -149,6 +149,8 @@ class Ractor
   # *   Can be configured per method whether to copy or move arguments and
   #     return values.
   # *   Blocks can be run in the calling Ractor or in the object Ractor.
+  # *   Blocks running in the calling Ractor can re-enter the wrapper, calling
+  #     other methods on it without deadlocking.
   # *   Raises exceptions thrown by the method.
   # *   Can serialize method calls for non-thread-safe objects, or run methods
   #     concurrently in multiple worker threads for thread-safe objects.
@@ -170,6 +172,9 @@ class Ractor
   #     later unless they are configured to run "in place". In particular,
   #     using blocks as a syntax to define callbacks can generally not be done
   #     through a wrapper.
+  # *   Re-entrant calls from a block are not safe if the wrapped method
+  #     invoked the block from a nested Fiber (such as inside an Enumerator)
+  #     or from a spawned Thread. Such re-entrant calls may deadlock.
   #
   class Wrapper
     ##
@@ -178,7 +183,10 @@ class Ractor
     class Error < ::Ractor::Error; end
 
     ##
-    # Raised when a {Ractor::Wrapper} server has crashed unexpectedly.
+    # Raised when a {Ractor::Wrapper} server has crashed unexpectedly. May
+    # also be raised in the calling Ractor when an in-flight method call is
+    # suspended at a block-yield point and the server (or its worker thread)
+    # crashes before the block result can be delivered.
     #
     class CrashedError < Error; end
 
@@ -252,6 +260,11 @@ class Ractor
       # thread-safe, a value of 2 or more allows concurrent calls. Leave at
       # the default of 0 to handle calls sequentially without worker threads.
       #
+      # The number of worker threads only needs to reflect the desired
+      # concurrency of independent calls. It does not need to be sized to the
+      # depth of re-entrant block calls, because suspended methods do not
+      # occupy a worker thread while waiting for a block to complete.
+      #
       # @param value [Integer]
       #
       def threads=(value)
@@ -298,6 +311,12 @@ class Ractor
       #   the wrapper sends a message back to the caller to execute the block
       #   in its original context. This means the block will have access to its
       #   lexical scope and any other data available to the calling Ractor.
+      #   Such blocks may safely re-enter the wrapper to invoke other methods
+      #   on it, *unless* the wrapped method invoked the block from a nested
+      #   Fiber (such as inside an Enumerator) or a spawned Thread, in which
+      #   case re-entrant calls from the block may deadlock. If you need to
+      #   invoke the block from a nested Fiber or a spawned Thread and the
+      #   block does not need re-entrancy, prefer the `:wrapped` setting.
       # * `:wrapped` - Blocks are executed directly in the wrapped object's
       #   context. This does not require any communication, but it means the
       #   block is removed from the caller's environment and does not have
@@ -505,7 +524,10 @@ class Ractor
     #     also be set via the configuration block. Defaults to the object_id.
     # @param threads [Integer] The number of worker threads to run.
     #     Defaults to 0, which causes the wrapper to run sequentially without
-    #     spawning workers. Can also be set via the configuration block.
+    #     spawning workers. Sized to the desired concurrency of independent
+    #     calls; does not need to account for re-entrant block calls, since
+    #     suspended methods do not occupy a worker thread while waiting for a
+    #     block to complete. Can also be set via the configuration block.
     # @param arguments [:move,:copy] How to communicate method arguments by
     #     default. If not specified, defaults to `:copy`.
     # @param results [:move,:copy,:void] How to communicate method return
@@ -657,7 +679,9 @@ class Ractor
 
     ##
     # Request that the wrapper stop. All currently running calls will complete
-    # before the wrapper actually terminates. However, any new calls will fail.
+    # before the wrapper actually terminates, including calls that are
+    # suspended waiting for a re-entrant block to return. New calls submitted
+    # after the stop request will fail with {StoppedError}.
     #
     # This method is idempotent and can be called multiple times (even from
     # different ractors).
