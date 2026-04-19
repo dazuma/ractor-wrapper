@@ -1326,6 +1326,8 @@ class Ractor
           when JoinMessage
             maybe_log("Received and queueing join request")
             @join_requests << message.reply_port
+          else
+            maybe_log("Unexpected message when draining pending fibers: #{message.class.name}")
           end
         end
       end
@@ -1456,7 +1458,7 @@ class Ractor
         # `@dispatcher` should not be nil in threaded mode, but we're
         # checking anyway just in case a crash happened during setup
         drain_dispatcher_after_crash(@dispatcher, error) if @threads_requested && @dispatcher
-        abort_pending_fibers(@pending_fibers, error) if !@threads_requested && @pending_fibers
+        abort_pending_fibers(@pending_fibers, error) unless @threads_requested
         drain_inbox_after_crash(@port, error)
         # `@active_workers` should not be nil in threaded mode, but we're
         # checking anyway just in case a crash happened during setup
@@ -1741,8 +1743,8 @@ class Ractor
       ##
       # Yield to a caller-side block via the blocking-fallback path: allocate
       # a temporary reply_port and block waiting for a response on it. Used
-      # when the fiber-suspend path is not available (currently: threaded
-      # mode; future: also nested-fiber and spawned-thread invocations).
+      # when the fiber-suspend path is not available (nested-fiber and
+      # spawned-thread invocations).
       #
       def blocking_yield_block(message, args, kwargs)
         reply_port = ::Ractor::Port.new
