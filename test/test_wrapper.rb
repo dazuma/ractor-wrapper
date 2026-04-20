@@ -638,4 +638,329 @@ describe ::Ractor::Wrapper do
       end
     end
   end
+
+  describe "fiber-based re-entrant block calls" do
+    include TimeoutHelper
+
+    # Bound the cleanup so a wrapper that has deadlocked under test cannot hang
+    # the entire suite. Under correct behavior the join completes immediately.
+    def bounded_cleanup(wrapper)
+      ::Thread.new { wrapper.async_stop.join }.join(3)
+    end
+
+    [
+      {desc: "isolated", opts: {}},
+      {desc: "local", opts: {use_current_ractor: true}},
+    ].each do |wrapper_config|
+      describe "in sequential mode (#{wrapper_config[:desc]})" do
+        let(:base_opts) { wrapper_config[:opts] }
+
+        before { @wrapper = nil }
+        after { bounded_cleanup(@wrapper) if @wrapper }
+
+        it "does not deadlock when a block re-enters the wrapper" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            collected = []
+            stub.each_item(["a", "b"]) { |item| collected << stub.echo_args(item) }
+            collected
+          end
+          assert_equal(['["a"], {}', '["b"], {}'], results)
+        end
+
+        it "does not deadlock when blocks re-enter the wrapper at depth 3" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            collected = []
+            stub.each_item([1, 2]) do |a|
+              stub.each_item([10, 20]) do |b|
+                stub.each_item([100]) do |c|
+                  collected << stub.echo_args(a + b + c)
+                end
+              end
+            end
+            collected
+          end
+          assert_equal(["[111], {}", "[121], {}", "[112], {}", "[122], {}"], results)
+        end
+
+        it "invokes the block correctly when called from within an Enumerator generator" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            stub.each_via_generator(["x", "y"], &:upcase)
+          end
+          assert_equal(["X", "Y"], results)
+        end
+
+        it "raises CrashedError when the server crashes with a fiber suspended" do
+          capture_subprocess_io do
+            @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+            stub = @wrapper.stub
+            latch = ::Queue.new
+            result_holder = []
+            call_thread = ::Thread.new do
+              stub.each_item(["a"]) do |item|
+                latch.pop
+                item.upcase
+              end
+            rescue ::Exception => e # rubocop:disable Lint/RescueException
+              result_holder << e
+            end
+            with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+            crash_port = ::Ractor::Port.new
+            @wrapper.instance_variable_get(:@port).send(CrashingJoinMessage.new(crash_port))
+            sleep 0.1
+            latch.push(:go)
+            assert(call_thread.join(2), "call thread should complete after crash")
+            assert_instance_of(::Ractor::Wrapper::CrashedError, result_holder.first)
+            with_timeout(2) { @wrapper.join }
+            @wrapper = nil
+          end
+        end
+
+        it "drains a suspended fiber when stopped during a block" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          latch = ::Queue.new
+          result_holder = []
+          call_thread = ::Thread.new do
+            result_holder << stub.each_item(["a"]) do |item|
+              latch.pop
+              item.upcase
+            end
+          end
+          with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+          @wrapper.async_stop
+          with_timeout(2) do
+            assert_raises(::Ractor::Wrapper::StoppedError) { stub.echo_args("nope") }
+          end
+          latch.push(:go)
+          assert(call_thread.join(2), "call thread should complete after latch released")
+          assert_equal([["a"]], result_holder)
+          with_timeout(2) { @wrapper.join }
+          @wrapper = nil
+        end
+
+        # Documents an unchanged limitation: when a block is invoked from a
+        # non-method-handling fiber (here, an Enumerator generator), the proxy
+        # proc falls back to the blocking path. A re-entrant wrapper call from
+        # inside that block then deadlocks the server.
+        it "still deadlocks when an Enumerator-invoked block re-enters the wrapper" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          assert_raises(::Minitest::Assertion) do
+            with_timeout(1) do
+              stub.each_via_generator(["a", "b"]) { |item| stub.echo_args(item) }
+            end
+          end
+        end
+      end
+
+      describe "in threaded mode (#{wrapper_config[:desc]})" do
+        let(:base_opts) { wrapper_config[:opts].merge(threads: 2) }
+
+        before { @wrapper = nil }
+        after { bounded_cleanup(@wrapper) if @wrapper }
+
+        it "does not deadlock when re-entry depth exceeds the worker count" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          results = with_timeout(2) do
+            collected = []
+            stub.each_item([1, 2]) do |a|
+              stub.each_item([10, 20]) do |b|
+                stub.each_item([100]) do |c|
+                  collected << stub.echo_args(a + b + c)
+                end
+              end
+            end
+            collected
+          end
+          assert_equal(["[111], {}", "[121], {}", "[112], {}", "[122], {}"], results)
+        end
+
+        it "drains a suspended fiber when stopped during a block" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          latch = ::Queue.new
+          result_holder = []
+          call_thread = ::Thread.new do
+            result_holder << stub.each_item(["a"]) do |item|
+              latch.pop
+              item.upcase
+            end
+          end
+          with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+          @wrapper.async_stop
+          with_timeout(2) do
+            assert_raises(::Ractor::Wrapper::StoppedError) { stub.echo_args("nope") }
+          end
+          latch.push(:go)
+          assert(call_thread.join(2), "call thread should complete after latch released")
+          assert_equal([["a"]], result_holder)
+          with_timeout(2) { @wrapper.join }
+          @wrapper = nil
+        end
+
+        it "raises CrashedError when the server crashes with fibers suspended in workers" do
+          capture_subprocess_io do
+            @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+            stub = @wrapper.stub
+            latch = ::Queue.new
+            result_holder = ::Queue.new
+            threads = ::Array.new(2) do |i|
+              ::Thread.new do
+                stub.each_item([i]) do |item|
+                  latch.pop
+                  item
+                end
+              rescue ::Exception => e # rubocop:disable Lint/RescueException
+                result_holder << e
+              end
+            end
+            with_timeout(2) { sleep 0.01 until latch.num_waiting == 2 }
+            crash_port = ::Ractor::Port.new
+            @wrapper.instance_variable_get(:@port).send(CrashingJoinMessage.new(crash_port))
+            sleep 0.1
+            2.times { latch.push(:go) }
+            threads.each { |t| assert(t.join(2), "caller thread should complete after crash") }
+            errors = []
+            errors << result_holder.pop until result_holder.empty?
+            assert_equal(2, errors.size)
+            errors.each do |e|
+              assert_instance_of(::Ractor::Wrapper::CrashedError, e)
+              assert_match(/terminated/, e.message)
+            end
+            with_timeout(2) { @wrapper.join }
+            @wrapper = nil
+          end
+        end
+
+        it "raises CrashedError when a worker thread crashes with a fiber suspended" do
+          skip "requires local mode to reach the worker thread" unless wrapper_config[:opts][:use_current_ractor]
+          capture_subprocess_io do
+            @wrapper = ::Ractor::Wrapper.new(remote, threads: 1, **wrapper_config[:opts])
+            stub = @wrapper.stub
+            latch = ::Queue.new
+            result_holder = []
+            call_thread = ::Thread.new do
+              stub.each_item(["a"]) do |item|
+                latch.pop
+                item.upcase
+              end
+            rescue ::Exception => e # rubocop:disable Lint/RescueException
+              result_holder << e
+            end
+            with_timeout(2) { sleep 0.01 until latch.num_waiting.positive? }
+            worker = ::Thread.list.find { |t| t.name&.include?(":worker:") }
+            assert(worker, "expected to find a named worker thread")
+            worker.raise(::RuntimeError.new("simulated worker crash"))
+            sleep 0.1
+            latch.push(:go)
+            assert(call_thread.join(2), "call thread should complete after worker crash")
+            assert_instance_of(::Ractor::Wrapper::CrashedError, result_holder.first)
+            assert_match(/simulated worker crash/, result_holder.first.message)
+            assert_match(/RuntimeError/, result_holder.first.message)
+            with_timeout(2) { @wrapper.join }
+            @wrapper = nil
+          end
+        end
+
+        it "handles concurrent callers making re-entrant block calls" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          caller_count = 4
+          per_caller = [1, 2, 3]
+          results = ::Array.new(caller_count)
+          threads = ::Array.new(caller_count) do |caller_num|
+            ::Thread.new do
+              collected = []
+              stub.each_item(per_caller) do |item|
+                collected << stub.echo_args((caller_num * 100) + item)
+              end
+              results[caller_num] = collected
+            end
+          end
+          with_timeout(5) { threads.each(&:join) }
+          assert_equal(caller_count, results.size)
+          results.each_with_index do |collected, caller_num|
+            expected = per_caller.map { |item| "[#{(caller_num * 100) + item}], {}" }
+            assert_equal(expected, collected, "results for caller #{caller_num}")
+          end
+        end
+      end
+
+      describe "functional coverage in fiber path (#{wrapper_config[:desc]})" do
+        let(:base_opts) { wrapper_config[:opts] }
+
+        before { @wrapper = nil }
+        after { bounded_cleanup(@wrapper) if @wrapper }
+
+        it "passes block return values back through fiber suspend/resume" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          collected = []
+          stub.each_item([1, 2, 3]) { |n| collected << (n * 10) }
+          assert_equal([10, 20, 30], collected)
+        end
+
+        it "propagates an exception raised in the block back through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          attempts = 0
+          assert_raises(::RuntimeError, "block boom") do
+            stub.each_item([1, 2, 3]) do |_n| # rubocop:disable Lint/UnreachableLoop
+              attempts += 1
+              raise "block boom"
+            end
+          end
+          assert_equal(1, attempts)
+        end
+
+        it "supports many yields from one method, each with a re-entrant call" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts)
+          stub = @wrapper.stub
+          collected = []
+          stub.each_item((1..5).to_a) { |n| collected << stub.echo_args(n) }
+          assert_equal((1..5).map { |n| "[#{n}], {}" }, collected)
+        end
+
+        it "preserves move semantics for block arguments through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts) do |config|
+            config.configure_method(:run_block_with_id, block_arguments: :move)
+          end
+          stub = @wrapper.stub
+          arg_id, server_side_id = stub.run_block_with_id("hello".dup) do |str, str_id|
+            [str.object_id, str_id]
+          end
+          assert_equal(server_side_id, arg_id)
+        end
+
+        it "moves block results back into the server through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, **base_opts) do |config|
+            config.configure_method(:run_block, block_results: :move)
+          end
+          stub = @wrapper.stub
+          returned = "ignored"
+          stub.run_block do
+            returned = "result".dup
+            returned
+          end
+          assert_raises(::Ractor::MovedError) { returned.to_s }
+        end
+
+        it "runs a wrapped-environment shareable block without going through the fiber path" do
+          @wrapper = ::Ractor::Wrapper.new(remote, block_environment: :wrapped, **base_opts)
+          stub = @wrapper.stub
+          result = stub.run_block(1, 2, a: "b", c: "d") do |one, two, a:, c:|
+            "result #{one} #{two} #{a} #{c}"
+          end
+          assert_equal("result 1 2 b d", result)
+        end
+      end
+    end
+  end
 end

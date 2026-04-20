@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
-expand :clean, paths: :gitignore
+expand :clean do |t|
+  t.paths = :gitignore
+  t.preserve = [".claude/plans", ".claude/settings.local.json"]
+end
 
 expand :minitest, libs: ["lib", "test"], bundler: true
 
