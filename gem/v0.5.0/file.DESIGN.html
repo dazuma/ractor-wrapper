@@ -1,0 +1,1299 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>
+  File: DESIGN
+  
+    &mdash; Ractor::Wrapper
+  
+</title>
+
+  <link rel="stylesheet" href="css/style.css" type="text/css">
+
+  <link rel="stylesheet" href="css/common.css" type="text/css">
+
+<script type="text/javascript">
+  pathId = "DESIGN";
+  relpath = '';
+</script>
+
+
+  <script type="text/javascript" charset="utf-8" src="js/jquery.js"></script>
+
+  <script type="text/javascript" charset="utf-8" src="js/app.js"></script>
+
+
+  </head>
+  <body>
+    <div id="main_progress" aria-hidden="true"></div>
+
+    <div class="nav_wrap">
+      <iframe id="nav" src="file_list.html?1"></iframe>
+      <div id="resizer"></div>
+    </div>
+
+    <div id="main" tabindex="-1">
+      <div id="header">
+        <div id="menu">
+  
+    <a href="_index.html">Index</a> &raquo; 
+    <span class="title">File: DESIGN</span>
+  
+</div>
+
+        <div id="search">
+  
+    <a class="full_list_link" id="class_list_link"
+        href="class_list.html">
+
+        <svg width="24" height="24">
+          <rect x="0" y="4" width="24" height="4" rx="1" ry="1"></rect>
+          <rect x="0" y="12" width="24" height="4" rx="1" ry="1"></rect>
+          <rect x="0" y="20" width="24" height="4" rx="1" ry="1"></rect>
+        </svg>
+    </a>
+  
+</div>
+        <div class="clear"></div>
+      </div>
+
+      <div id="content"><div id='filecontents'><h1 id="ractor-wrapper-design-document">Ractor::Wrapper — Design Document</h1>
+
+<p>This document describes how <code>Ractor::Wrapper</code> is implemented. It is intended
+for three audiences:</p>
+
+<ul>
+<li> <strong>Power users</strong> who want to understand how the gem behaves well enough to
+make informed decisions about incorporating it into a system.</li>
+<li> <strong>Contributors</strong> who need to understand the internals before changing them.</li>
+<li> <strong>Future maintainers</strong> who want a permanent record of the architectural
+decisions baked into the library.</li>
+</ul>
+
+<p>The <code>README.md</code> focuses on how to <em>use</em> the gem. In contrast, this document
+focuses on how it <em>works</em> and <em>why</em> it was built that way.</p>
+
+<p>Note: This document was largely reverse-engineered from the code and its
+reference documentation by Claude Opus 4.7, with some human edits.</p>
+
+<hr>
+
+<h2 id="1-problem-statement">1. Problem statement</h2>
+
+<p>A Ractor-shareable object is one that can be referenced from more than one
+Ractor at once. The current Ruby rules (as of 4.0) require shareable objects
+to be deeply immutable, which rules out a large fraction of Ruby objects
+that Ruby programs actually need to share. Examples include <code>Net::HTTP</code>
+sessions, database connections, file handles, cache objects, and parsers
+with internal state.</p>
+
+<p>The canonical Ractor answer is &quot;don&#39;t share it; write an actor.&quot; But writing
+an actor from scratch means hand-crafting a message loop, a serialization
+convention, block handling, lifecycle, error propagation, and everything
+else. It also means rewriting every existing library in that style.</p>
+
+<p><code>Ractor::Wrapper</code> provides this plumbing once, so that any ordinary Ruby
+object can be exposed to other Ractors through a shareable stub that
+proxies calls back to a single controlled home. This allows both legacy
+non-shareable objects to be used in a multi-Ractor environment, and new
+Ractor-aware objects to be written easily.</p>
+
+<p>The core design goal is to reproduce, as faithfully as reasonable, the
+semantics of calling the object directly, including arbitrary arguments and
+return values, keyword arguments, blocks, exceptions, and even re-entrant calls
+from blocks. The gem deliberately accepts some limitations in service of that
+goal, and those limitations are discussed throughout this document.</p>
+
+<hr>
+
+<h2 id="2-high-level-structure">2. High-level structure</h2>
+
+<p>The entire library is in <code>lib/ractor/wrapper.rb</code>. The classes involved are:</p>
+
+<ul>
+<li> <strong><code>Ractor::Wrapper</code></strong> — the Ractor-shareable public-facing handle. Holds
+the <code>Configuration</code>, a <code>Stub</code>, a <code>Ractor::Port</code> to send messages to the
+server. It also provides the <code>call</code> method that provides the central
+interface to invoke methods on the wrapped object, the main caller-side
+message loop and block-yield handler, and wrapper lifecycle operations
+(<code>async_stop</code>, <code>join</code>, <code>recover_object</code>).</li>
+<li> <strong><code>Ractor::Wrapper::Stub</code></strong> — a Ractor-shareable proxy that mimics the
+method interface of the original object. Uses <code>method_missing</code> to forward
+arbitrary method calls to the wrapper.</li>
+<li> <strong><code>Ractor::Wrapper::Configuration</code></strong> — builder for wrapper options,
+including per-method settings.</li>
+<li> <strong><code>Ractor::Wrapper::MethodSettings</code></strong> — a frozen value object holding the
+copy/move/void choices for a single method.</li>
+<li> <strong><code>Ractor::Wrapper::Server</code></strong> — the backend that runs the object and
+services messages. In isolated mode it runs in its own Ractor; in local
+mode it runs as one or more threads inside the Ractor that created the
+wrapper.</li>
+<li> <strong><code>Ractor::Wrapper::Server::Dispatcher</code></strong> — a thread-safe work distributor
+used only in threaded mode. Handles routing of new calls (via a shared
+queue) and fiber resumes (via per-worker queues).</li>
+<li> <strong>Message types</strong> (all <code>Data.define</code> frozen structs):
+<code>InitMessage</code>, <code>CallMessage</code>, <code>ReturnMessage</code>, <code>ExceptionMessage</code>,
+<code>FiberYieldMessage</code>, <code>BlockingYieldMessage</code>, <code>FiberReturnMessage</code>,
+<code>FiberExceptionMessage</code>, <code>StopMessage</code>, <code>JoinMessage</code>, <code>JoinReplyMessage</code>,
+<code>WorkerStoppedMessage</code>.</li>
+</ul>
+
+<p>Viewed from the outside, the runtime architecture looks like this:</p>
+
+<pre class="code ruby"><code class="ruby">Caller Ractor(s)                     Wrapper                  Wrapped object
+┌──────────────────┐        ┌───────────────────────┐         ┌────────────┐
+│ stub.some_method │───────▶│ Wrapper#call          │         │  &lt;object&gt;  │
+│                  │ (Stub) │   sends CallMessage   │         │            │
+│                  │        └─────────┬─────────────┘         └──────▲─────┘
+│                  │                  │ @port                        │
+│                  │        ┌─────────▼──────────────┐               │
+│                  │        │ Server main fiber /    │ fibers /      │
+│ ◀── ReturnMsg ───│────────│ worker threads         │ threads ◀─────┘
+│ ◀── ExceptionMsg │        │ (dispatch, fiber mgmt) │
+│ ◀── YieldMsg ────│──▶ run block ─▶ send result ─▶  │
+└──────────────────┘        └────────────────────────┘
+</code></pre>
+
+<p>The rest of this document expands each of these boxes.</p>
+
+<hr>
+
+<h2 id="3-configuration">3. Configuration</h2>
+
+<p>Configuration is a two-stage process: keyword arguments to <code>Wrapper.new</code>,
+optionally followed by a block that yields a mutable <code>Configuration</code> instance.
+The block runs <em>before</em> the wrapper materializes its server, so it is the last
+chance to adjust behavior before the wrapper is frozen for Ractor shareability.</p>
+
+<p>Inside <code>Wrapper#initialize</code> the sequence is:</p>
+
+<ol>
+<li>Validate that the supplied object is not already a moved
+<code>Ractor::MovedObject</code>.</li>
+<li>Build a fresh <code>Configuration</code>, seeding it with constructor kwargs.</li>
+<li>Yield it to the user&#39;s block, if any. Block-provided settings override
+kwargs because they are applied later.</li>
+<li>Resolve <code>Configuration#final_method_settings</code> into a frozen hash.</li>
+<li>Create the <code>Stub</code>, freeze the wrapper, and start the server.</li>
+</ol>
+
+<h3 id="3-1-wrapper-level-settings">3.1 Wrapper-level settings</h3>
+
+<table><thead>
+<tr>
+<th>Setting</th>
+<th>Type</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead><tbody>
+<tr>
+<td><code>name</code></td>
+<td><code>String</code></td>
+<td><code>object_id.to_s</code></td>
+<td>Identifies the wrapper in log output and as the Ractor name.</td>
+</tr>
+<tr>
+<td><code>use_current_ractor</code></td>
+<td><code>Boolean</code></td>
+<td><code>false</code></td>
+<td>Selects the execution mode (see §4).</td>
+</tr>
+<tr>
+<td><code>threads</code></td>
+<td><code>Integer</code></td>
+<td><code>0</code></td>
+<td>Number of worker threads. <code>0</code> means sequential.</td>
+</tr>
+<tr>
+<td><code>enable_logging</code></td>
+<td><code>Boolean</code></td>
+<td><code>false</code></td>
+<td>Enables internal stderr logging.</td>
+</tr>
+</tbody></table>
+
+<h3 id="3-2-method-level-settings-methodsettings">3.2 Method-level settings — <code>MethodSettings</code></h3>
+
+<p><code>MethodSettings</code> governs how a single method communicates its data. Each
+instance is frozen and carries five values:</p>
+
+<table><thead>
+<tr>
+<th>Field</th>
+<th>Values</th>
+<th>Meaning</th>
+</tr>
+</thead><tbody>
+<tr>
+<td><code>arguments</code></td>
+<td><code>:copy</code> \</td>
+<td><code>:move</code></td>
+</tr>
+<tr>
+<td><code>results</code></td>
+<td><code>:copy</code> \</td>
+<td><code>:move</code> \</td>
+</tr>
+<tr>
+<td><code>block_arguments</code></td>
+<td><code>:copy</code> \</td>
+<td><code>:move</code></td>
+</tr>
+<tr>
+<td><code>block_results</code></td>
+<td><code>:copy</code> \</td>
+<td><code>:move</code> \</td>
+</tr>
+<tr>
+<td><code>block_environment</code></td>
+<td><code>:caller</code> \</td>
+<td><code>:wrapped</code></td>
+</tr>
+</tbody></table>
+
+<p>The settings are stored in <code>Configuration#@method_settings</code>, keyed by method
+name (Symbol) or <code>nil</code> for the defaults. <code>final_method_settings</code> produces the
+resolved hash by:</p>
+
+<ol>
+<li>Starting with a hard-coded fallback of all <code>:copy</code> and
+<code>block_environment: :caller</code>.</li>
+<li>Overlaying the <code>nil</code> entry (defaults the user supplied or got from kwargs)
+on top of that fallback.</li>
+<li>For each named-method entry, overlaying it on top of those defaults.</li>
+</ol>
+
+<p>Looking a method up via <code>Wrapper#method_settings(name)</code> returns the
+per-method <code>MethodSettings</code> if present, otherwise the defaults. Because
+<code>MethodSettings</code> is frozen and the outer hash is frozen, this value is
+safely shared between the caller&#39;s Ractor and the server&#39;s Ractor — it
+travels inside each <code>CallMessage</code>.</p>
+
+<h3 id="3-3-why-the-config-travels-with-every-message">3.3 Why the config travels with every message</h3>
+
+<p>Embedding <code>settings</code> inside <code>CallMessage</code> is intentional. The server
+needs to know, per call: whether to move or copy the return value,
+whether to expect to run a block locally or to yield one, and whether to
+void the return. Sending the settings with the message keeps the server
+stateless with respect to configuration — it does not need a synchronized
+copy of the settings hash, and configuration changes (were they ever
+added) would not race with in-flight calls.</p>
+
+<h3 id="3-4-copy-move-void-what-they-really-mean">3.4 Copy / move / void — what they really mean</h3>
+
+<ul>
+<li> <code>:copy</code> — the value is <code>Marshal</code>-style deep-cloned by Ractor when it
+crosses the boundary. Safe but potentially expensive for large payloads.</li>
+<li> <code>:move</code> — the value is transferred; the sender can no longer use it.
+This is sent as the <code>move:</code> keyword of <code>Ractor::Port#send</code>. Useful for
+large buffers and unique resources. The ownership model is subtle: if
+the caller passes a large string as a <code>:move</code> argument, it becomes a
+<code>Ractor::MovedObject</code> for the caller and must not be touched again.</li>
+<li> <code>:void</code> — the return value (or block result) is dropped and the
+recipient sees <code>nil</code>. This exists because many Ruby methods return a value
+&quot;by accident&quot;; they don&#39;t intend to return a specific value, but whatever
+final object is evaluated at the end of the method still gets functionally
+returned. If that object is large, the cost of shipping it could be both
+substantial and unnecessary: <code>:copy</code> might be expensive, and <code>:move</code> could
+be disastrous, making parts of the internal state unreachable. <code>:void</code> is
+an escape hatch that simply disables returning any value in such cases.</li>
+</ul>
+
+<hr>
+
+<h2 id="4-execution-modes">4. Execution modes</h2>
+
+<p>There are two orthogonal axes of execution mode, giving four combinations:</p>
+
+<table><thead>
+<tr>
+<th></th>
+<th>Sequential (<code>threads: 0</code>)</th>
+<th>Threaded (<code>threads: N&gt;0</code>)</th>
+</tr>
+</thead><tbody>
+<tr>
+<td><strong>Isolated</strong> (<code>use_current_ractor: false</code>)</td>
+<td>Object moved to a new Ractor; one method at a time.</td>
+<td>Object moved to a new Ractor; N worker threads inside it.</td>
+</tr>
+<tr>
+<td><strong>Local</strong> (<code>use_current_ractor: true</code>)</td>
+<td>Object stays in the current Ractor; one thread serves calls.</td>
+<td>Object stays in the current Ractor; N worker threads serve calls.</td>
+</tr>
+</tbody></table>
+
+<h3 id="4-1-isolated-mode">4.1 Isolated mode</h3>
+
+<p><code>Wrapper#setup_isolated_server</code> spawns a new <code>Ractor</code> that immediately
+calls <code>Server.run_isolated</code>. The object is <em>not</em> passed as a Ractor
+constructor argument, as doing so would copy the object. Instead, once the
+Ractor is running, the wrapper sends a <code>InitMessage</code> (containing the object
+and the stub) with <code>move: true</code>, and the server&#39;s first action inside
+<code>receive_remote_object</code> is to receive and unpack it.</p>
+
+<p>Because the object now lives in the server&#39;s Ractor, the original caller
+can no longer touch it directly. It can, however, retrieve the object at
+the end of the wrapper&#39;s life via <code>Wrapper#recover_object</code>, which is
+implemented as <code>@ractor.value</code> — the Ractor&#39;s terminal value is the
+wrapped object, returned from <code>Server#run</code>.</p>
+
+<h3 id="4-2-local-mode-use_current_ractor-true">4.2 Local mode (<code>use_current_ractor: true</code>)</h3>
+
+<p><code>Wrapper#setup_local_server</code> does not spawn a Ractor at all. It creates
+a <code>Ractor::Port</code>, marks the wrapper frozen (so the stub is shareable),
+and starts a regular <code>Thread</code> that runs <code>Server.run_local</code>. The wrapped
+object is never moved; it stays with its creator.</p>
+
+<p>This is the right mode for objects that cannot be moved between Ractors.
+The canonical example is a SQLite3 database handle, which is bound to the
+Ractor that created it. It&#39;s also appropriate when you want to keep
+direct access to the object from the creating Ractor (say, for quick
+synchronous probes that avoid the wrapper&#39;s message path entirely), which
+is only safe to do outside method windows driven by the wrapper.</p>
+
+<p>Tradeoffs vs isolated mode:</p>
+
+<ul>
+<li> No <code>recover_object</code> (the object was never moved; <code>recover_object</code> raises).</li>
+<li> No isolation: a bug in the wrapped object can corrupt state in the
+host Ractor, since they share a Ractor.</li>
+<li> Slightly lower overhead per call: no cross-Ractor marshalling of
+arguments / return values if both caller and server happen to be in
+the same Ractor (but note that in local mode other Ractors can still
+call through the stub, and <em>those</em> calls pay the normal crossing cost).</li>
+</ul>
+
+<h3 id="4-3-sequential-vs-threaded">4.3 Sequential vs threaded</h3>
+
+<p><code>threads: 0</code> (sequential) means no <code>Dispatcher</code> is created and calls are
+executed directly by the server&#39;s main message-handling loop. One method
+runs at a time.</p>
+
+<p><code>threads: N &gt; 0</code> creates a <code>Dispatcher</code> and spawns N worker threads.
+Workers pull <code>CallMessage</code>s off the dispatcher&#39;s shared queue and execute
+them concurrently. The concurrency ceiling is N regardless of how many
+callers are blocked on calls.</p>
+
+<p>A sharp note from the constructor doc: the <code>threads</code> value should be
+sized to the concurrency of <em>independent</em> calls, not to the re-entrancy
+depth. A suspended method (waiting for a block result) does not occupy a
+worker — it only occupies a fiber. The worker returns to the dispatch
+loop and can service another call. This is why the threading model costs
+very little even for deeply re-entrant workloads: fibers are cheap,
+threads are not, and the library deliberately spends the former.</p>
+
+<hr>
+
+<h2 id="5-the-stub">5. The Stub</h2>
+
+<p><code>Ractor::Wrapper::Stub</code> is minimal by design:</p>
+
+<pre class="code ruby"><code class="ruby">Stub
+  @wrapper  (frozen reference to Wrapper)
+  method_missing(name, ...) → @wrapper.call(name, ...)
+  respond_to_missing?(name, include_all) → @wrapper.call(:respond_to?, ...)
+</code></pre>
+
+<p>It freezes itself in <code>initialize</code>. Because its only instance variable is
+a frozen reference to a frozen <code>Wrapper</code>, and the <code>Wrapper</code> is itself
+shareable after construction, the stub is transitively shareable. That
+means you can pass it freely across Ractor boundaries and every Ractor
+can call methods on the wrapped object through it.</p>
+
+<p>A few design choices worth calling out:</p>
+
+<ul>
+<li> <strong>Why <code>method_missing</code> instead of pre-generating methods?</strong> The stub
+must work for any wrapped object, including ones that define methods
+dynamically at runtime. There is no way to introspect the wrapped
+object&#39;s method list from another Ractor without paying a message
+round-trip anyway.</li>
+<li> <strong><code>respond_to_missing?</code> proxies through.</strong> If you ask the stub whether
+the underlying object responds to <code>:foo</code>, the answer has to come from
+the server, because only it can see the object. So <code>respond_to?</code> is
+itself a round-trip call. This is slower than a direct lookup but
+semantically faithful.</li>
+<li> <strong>Return-value substitution.</strong> If the wrapped object returns <code>self</code>,
+the server substitutes the stub for the return value. This preserves
+method chaining through the stub boundary — <code>stub.tap { ... }</code> works as
+expected — even though <code>self</code> from the server&#39;s perspective is the
+bare object, not the stub. The same substitution is performed for
+block arguments (see §7).</li>
+<li> <strong>No <code>call</code> method.</strong> <code>Wrapper#call</code> is the low-level escape hatch; the
+stub always goes through <code>method_missing</code>. This means you cannot use
+<code>stub.call(:foo)</code> to bypass the proxy.</li>
+</ul>
+
+<hr>
+
+<h2 id="6-messaging-protocol">6. Messaging protocol</h2>
+
+<p>All messages are frozen <code>Data</code> structs, making them shareable and immutable.
+This section catalogs them by direction.</p>
+
+<h3 id="6-1-from-caller-to-server">6.1 From caller to server</h3>
+
+<table><thead>
+<tr>
+<th>Message</th>
+<th>Sender</th>
+<th>Receiver</th>
+<th>Purpose</th>
+</tr>
+</thead><tbody>
+<tr>
+<td><code>InitMessage(object, stub)</code></td>
+<td><code>Wrapper#setup_isolated_server</code></td>
+<td>Server&#39;s <code>receive_remote_object</code></td>
+<td>One-shot initialization for isolated mode. Sent with <code>move: true</code>.</td>
+</tr>
+<tr>
+<td><code>CallMessage(method_name, args, kwargs, block_arg, transaction, settings, reply_port)</code></td>
+<td><code>Wrapper#call</code></td>
+<td>Server main loop</td>
+<td>Request a method invocation.</td>
+</tr>
+<tr>
+<td><code>FiberReturnMessage(value, fiber_id)</code></td>
+<td><code>Wrapper#send_block_result</code></td>
+<td>Server main loop</td>
+<td>Block result (fiber-suspend path).</td>
+</tr>
+<tr>
+<td><code>FiberExceptionMessage(exception, fiber_id)</code></td>
+<td><code>Wrapper#send_block_exception</code></td>
+<td>Server main loop</td>
+<td>Block exception (fiber-suspend path).</td>
+</tr>
+<tr>
+<td><code>StopMessage()</code></td>
+<td><code>Wrapper#async_stop</code></td>
+<td>Server main loop</td>
+<td>Request graceful shutdown.</td>
+</tr>
+<tr>
+<td><code>JoinMessage(reply_port)</code></td>
+<td><code>Wrapper#join</code> (local mode only)</td>
+<td>Server main loop</td>
+<td>Request notification when server has fully stopped.</td>
+</tr>
+</tbody></table>
+
+<h3 id="6-2-from-server-to-caller">6.2 From server to caller</h3>
+
+<table><thead>
+<tr>
+<th>Message</th>
+<th>Sender</th>
+<th>Receiver</th>
+<th>Purpose</th>
+</tr>
+</thead><tbody>
+<tr>
+<td><code>ReturnMessage(value)</code></td>
+<td><code>Server#handle_method</code> (or main-loop refusal)</td>
+<td><code>Wrapper#call</code></td>
+<td>Normal method result.</td>
+</tr>
+<tr>
+<td><code>ExceptionMessage(exception)</code></td>
+<td>Server (several sites)</td>
+<td><code>Wrapper#call</code></td>
+<td>Method raised an exception; server-side refusal; or crash cleanup.</td>
+</tr>
+<tr>
+<td><code>FiberYieldMessage(args, kwargs, fiber_id)</code></td>
+<td><code>Server#fiber_yield_block</code></td>
+<td><code>Wrapper#call</code> / <code>handle_yield</code></td>
+<td>Request to run a block on the caller side (fiber-suspend path).</td>
+</tr>
+<tr>
+<td><code>BlockingYieldMessage(args, kwargs, reply_port)</code></td>
+<td><code>Server#blocking_yield_block</code></td>
+<td><code>Wrapper#call</code> / <code>handle_yield</code></td>
+<td>Same but blocking-fallback path.</td>
+</tr>
+<tr>
+<td><code>JoinReplyMessage()</code></td>
+<td><code>Server#send_join_reply</code></td>
+<td><code>Wrapper#join</code></td>
+<td>Terminal notification that the server has finished cleaning up.</td>
+</tr>
+</tbody></table>
+
+<h3 id="6-3-within-the-server">6.3 Within the server</h3>
+
+<table><thead>
+<tr>
+<th>Message</th>
+<th>Sender</th>
+<th>Receiver</th>
+<th>Purpose</th>
+</tr>
+</thead><tbody>
+<tr>
+<td><code>WorkerStoppedMessage(worker_num)</code></td>
+<td><code>Server#cleanup_worker</code></td>
+<td>Server main loop</td>
+<td>A worker thread has terminated. Carried on the main <code>@port</code>.</td>
+</tr>
+</tbody></table>
+
+<h3 id="6-4-port-topology">6.4 Port topology</h3>
+
+<p>Each <code>CallMessage</code> carries its own <code>reply_port</code>, which is a fresh
+<code>Ractor::Port</code> created by <code>Wrapper#call</code>. This gives the caller a private
+channel for all replies to that call: return value, exceptions, and both
+variants of yield message. The reply port is closed when the call returns
+(success or exception) via the <code>ensure</code> block.</p>
+
+<p>The server has a single main <code>@port</code> that it receives on. It multiplexes
+everything: new calls, stop/join requests, fiber resumes, and worker
+death notifications. This is why every message that the server needs to
+dispatch internally carries enough information to route itself (e.g.
+<code>FiberReturnMessage</code> includes the <code>fiber_id</code>).</p>
+
+<h3 id="6-5-observability-using-transaction">6.5 Observability using <code>transaction</code></h3>
+
+<p>The <code>transaction</code> field on <code>CallMessage</code> is a 16-character base-36 random
+string created by <code>Wrapper#make_transaction</code>. It exists to correlate log lines
+across caller and server for a single call; it is not used for dispatch.</p>
+
+<hr>
+
+<h2 id="7-blocks-re-entrancy-and-fiber-magic">7. Blocks, re-entrancy, and fiber magic</h2>
+
+<p>This is the most subtle part of the library. The core problem: a caller
+may pass a block (<code>stub.each { |x| stub.process(x) }</code>). Where does that
+block&#39;s body <em>run</em>?</p>
+
+<h3 id="7-1-the-two-block-environments">7.1 The two block environments</h3>
+
+<p><code>block_environment: :caller</code> (default) — the block runs in the caller&#39;s
+Ractor, with full access to the caller&#39;s lexical scope. The server has
+to ask the caller to run each invocation, wait for the result, and then
+resume the method.</p>
+
+<p><code>block_environment: :wrapped</code> — the block runs in the server Ractor, in
+the wrapped object&#39;s context. No inter-Ractor communication is needed per
+block call. The block is captured as a <code>Ractor.shareable_proc</code>, which
+means it can only reference shareable state. Closures over caller-side
+mutable variables will fail at shareability-check time.</p>
+
+<p>The tradeoff is: <code>:caller</code> is the common case because most blocks <em>do</em>
+close over state (accumulators, config, etc.), but paying a round-trip
+per invocation of a block called in a tight loop (think <code>each</code> over a
+large collection) can be very expensive. <code>:wrapped</code> is the escape hatch
+when you really want the block body to live alongside the method and the
+block is self-contained. The README&#39;s Enumerator-over-SQLite example is
+one such case.</p>
+
+<h3 id="7-2-how-the-block-arg-is-represented">7.2 How the block arg is represented</h3>
+
+<p><code>Wrapper#make_block_arg</code> looks at the <code>block_environment</code> setting and
+constructs one of three things:</p>
+
+<ul>
+<li> <code>nil</code> — no block was given.</li>
+<li> <code>:send_block_message</code> (a sentinel symbol) — <code>:caller</code> mode. The server must
+construct a local proc that forwards each invocation back across the wire.</li>
+<li> A <code>Ractor.shareable_proc</code> — <code>:wrapped</code> mode. The shareable proc travels
+directly inside the <code>CallMessage</code> and is invoked in-Ractor.</li>
+</ul>
+
+<p>On the server side, <code>Server#make_block</code> translates this into the actual
+proc passed to the wrapped method:</p>
+
+<ul>
+<li> <code>nil</code> → no block is passed; <code>__send__(name, *args, **kwargs, &amp;nil)</code> is
+equivalent to calling without a block.</li>
+<li> A shareable proc → used directly.</li>
+<li> <code>:send_block_message</code> → a proc is constructed that, when invoked,
+performs the round-trip yield dance described in §7.3.</li>
+</ul>
+
+<h3 id="7-3-caller-side-block-invocation-the-fiber-suspend-path">7.3 Caller-side block invocation — the fiber-suspend path</h3>
+
+<p>When the wrapped object invokes a <code>:caller</code>-environment block, the proc
+created by <code>make_block</code> runs in the server. That proc needs to:</p>
+
+<ol>
+<li>Ship the arguments over to the caller.</li>
+<li>Wait for the caller to produce a result (or exception).</li>
+<li>Return that result (or raise that exception) to the wrapped method
+so execution continues.</li>
+</ol>
+
+<p>Naively, step 2 is a blocking wait. But the server cannot just block, because
+other callers (or the same caller, via re-entrancy) might have messages
+waiting, and we do not want to deadlock. Moreover, the server&#39;s concurrency
+model is &quot;handle one message at a time in the main loop,&quot; which cannot be
+respected if methods can arbitrarily block it.</p>
+
+<p>The solution is to run method bodies inside <code>Fiber</code>s. When a method needs to
+yield to a caller-side block, its fiber calls <code>Fiber.yield</code>. Control returns to
+the main loop, which processes further messages. When a matching
+<code>FiberReturnMessage</code> / <code>FiberExceptionMessage</code> arrives, the main loop looks up
+the suspended fiber by <code>fiber_id</code> and resumes it with the reply message. The
+fiber picks up where it left off and continues the method.</p>
+
+<p>Here is the full choreography, in sequence-diagram form, for one block
+invocation (assume sequential mode, <code>:caller</code> block):</p>
+
+<pre class="code ruby"><code class="ruby">Caller Ractor              Wrapper owner / Server             Wrapped object
+
+Wrapper#call
+  reply_port = Port.new
+  send(CallMessage) ────────▶ main_loop
+                                dispatch_call
+                                  start_method_fiber ──▶ Fiber F
+                                                           handle_method
+                                                             object.m(&amp;block) ─▶ method runs
+                                                                                    yield arg
+                                                               block.call(arg) ◀──┘
+                                                               (our synthetic proc)
+                                                                 fiber_yield_block
+                                                                   send(FiberYieldMessage
+                                                                     fiber_id=F.id) ────▶ reply_port
+  loop: receive                                                     Fiber.yield ←─ suspends F
+    FiberYieldMessage ◀────── reply_port
+    handle_yield
+      run block in caller
+      result = ...
+      send(FiberReturnMessage) ──▶ server @port
+                                main_loop
+                                  dispatch_fiber_resume
+                                    resume_method_fiber(msg)
+                                      F.resume(msg) ──▶ fiber_yield_block returns value
+                                                           method continues, returns result
+                                                         handle_method sends ReturnMessage ▶ reply_port
+  loop: receive
+    ReturnMessage ◀──────────── reply_port
+    return value
+</code></pre>
+
+<p>Critical invariants:</p>
+
+<ul>
+<li> <strong>Fibers cannot migrate between threads.</strong> A fiber can only be resumed from
+the thread that last resumed it. In sequential mode this is trivially
+satisfied, since the main loop is the only place that runs fibers. In
+threaded mode, §8 explains how the <code>Dispatcher</code> preserves this invariant.</li>
+<li> <strong>The main loop never blocks inside a method.</strong> It only blocks on
+<code>@port.receive</code>. All method work is delegated to a fiber (sequential)
+or a worker thread (threaded).</li>
+<li> <strong>Fiber ids are just <code>object_id</code>s.</strong> They are unique while the fiber
+is alive, which is long enough for routing. Once a fiber completes it
+is removed from the <code>@pending_fibers</code> / per-worker <code>pending</code> hash, so
+stale <code>fiber_id</code>s cannot collide with fresh fibers.</li>
+</ul>
+
+<h3 id="7-4-caller-side-block-invocation-the-blocking-fallback-path">7.4 Caller-side block invocation — the blocking-fallback path</h3>
+
+<p>The fiber-suspend path depends on one thing: the block-invoking proc being
+called from the very same fiber that <code>handle_method</code> started in. That is true
+for straightforward method bodies. It is <em>not</em> true in two cases:</p>
+
+<ul>
+<li> The wrapped method invokes the block from a nested fiber. The classic
+example is an <code>Enumerator</code>, whose <code>each</code> runs the user&#39;s block in a
+generator fiber, not the outer fiber.</li>
+<li> The wrapped method invokes the block from a spawned thread.</li>
+</ul>
+
+<p>Calling <code>Fiber.yield</code> from either context does something different from what we
+need: it either yields the wrong fiber, or raises a <code>FiberError</code>. To stay
+functional in these cases, <code>Server#make_block</code> captures the expected fiber at
+construction time and checks at call time:</p>
+
+<pre class="code ruby"><code class="ruby">if Fiber.current.equal?(expected_fiber)
+  fiber_yield_block(...)   # the fast path
+else
+  blocking_yield_block(...) # the fallback
+end
+</code></pre>
+
+<p>The blocking fallback:</p>
+
+<ol>
+<li>Creates a fresh temporary <code>reply_port</code>.</li>
+<li>Sends a <code>BlockingYieldMessage</code> carrying that port.</li>
+<li>Calls <code>reply_port.receive</code> — a real, thread-level block.</li>
+<li>The caller&#39;s <code>handle_yield</code> sends the reply directly to the temporary port.</li>
+</ol>
+
+<p>This path <em>does</em> block the invoking thread (or spawned thread / nested fiber).
+That is its defining limitation. Two consequences follow:</p>
+
+<ul>
+<li> <strong>In sequential mode with a nested-fiber block invocation, the server main
+loop is blocked.</strong> No other messages can be processed while the block runs
+in the caller. If the block tries to re-enter the wrapper, it will deadlock.
+The re-entering call goes to the server&#39;s port, but the server cannot
+handle it. This is the limitation the README&#39;s caveats warn about.</li>
+<li> <strong>In threaded mode, only one worker is blocked.</strong> Other workers continue to
+service other calls. But the blocked worker still cannot service anything
+else, so a long-running nested-fiber block still reduces effective
+concurrency by one.</li>
+</ul>
+
+<p>The hybrid design (fast path where possible, fallback where necessary)
+is a deliberate trade-off: correctness in the common case, plus continued
+functionality in the exotic case, at the cost of a deadlock hazard that
+users have to be aware of when their block is re-entrant <em>and</em> invoked
+from a nested fiber or thread.</p>
+
+<h3 id="7-5-self-substitution-for-blocks">7.5 <code>self</code>-substitution for blocks</h3>
+
+<p>When a <code>:caller</code> block is invoked, it may receive the wrapped object
+itself as an argument (think <code>each_with_object(self) { ... }</code>). Before
+shipping the block arguments over the port, <code>make_block</code>&#39;s synthetic
+proc replaces any argument that is <code>equal?(@object)</code> with <code>@stub</code>. This
+keeps the caller from ever seeing the bare object and accidentally
+performing direct operations on it from the wrong Ractor.</p>
+
+<hr>
+
+<h2 id="8-worker-thread-dispatch-the-dispatcher">8. Worker thread dispatch — the <code>Dispatcher</code></h2>
+
+<p>Threaded mode introduces the <code>Dispatcher</code> class, which solves two
+problems at once: <strong>work distribution</strong> and <strong>fiber affinity</strong>.</p>
+
+<h3 id="8-1-why-not-a-single-shared-queue">8.1 Why not a single shared queue?</h3>
+
+<p>The obvious design would be: one thread-safe queue, all workers pull.
+That works for new calls. It does <em>not</em> work for fiber resumes. If
+worker A started fiber F, then F suspended, a <code>FiberReturnMessage</code> for F
+arrives, and worker B dequeues it, then B cannot resume F, because Ruby
+requires fibers to be resumed from their last resuming thread.</p>
+
+<h3 id="8-2-queue-layout">8.2 Queue layout</h3>
+
+<p>The <code>Dispatcher</code> holds:</p>
+
+<ul>
+<li> A <strong>shared queue</strong> (<code>@shared_queue</code>) for new <code>CallMessage</code>s. Any
+worker may dequeue.</li>
+<li> <strong>Per-worker queues</strong> (<code>@worker_queues</code>, indexed by <code>worker_num</code>) for
+fiber resumes. Only worker <code>N</code> dequeues from <code>@worker_queues[N]</code>.</li>
+<li> A <strong>fiber→worker map</strong> (<code>@fiber_to_worker</code>) so the main loop can route
+incoming <code>FiberReturnMessage</code> / <code>FiberExceptionMessage</code> to the correct
+per-worker queue.</li>
+<li> Flags: <code>@closed</code> and <code>@crashed</code>, driving graceful vs abortive shutdowns.</li>
+<li> A single <code>@mutex</code> + <code>@cond</code> pair guarding all of the above.</li>
+</ul>
+
+<p>Producers call <code>@cond.broadcast</code> rather than <code>@cond.signal</code> so a worker
+waiting on its per-worker queue is not starved by shared-queue activity.</p>
+
+<h3 id="8-3-dequeue-priority">8.3 <code>dequeue</code> priority</h3>
+
+<p>Each worker thread calls <code>@dispatcher.dequeue(worker_num, accept_calls:)</code>
+in a loop. Inside the mutex, <code>dequeue</code> returns the first of:</p>
+
+<ol>
+<li>An item from <strong>its own per-worker queue</strong> (a fiber resume). Always
+considered first, even after close — in-flight fibers must complete.</li>
+<li><code>TERMINATE</code> if <code>@crashed</code> is set and the per-worker queue is empty.</li>
+<li>An item from the <strong>shared queue</strong>, but only if <code>accept_calls</code> is
+<code>true</code> and the dispatcher is not closed.</li>
+<li>A one-shot <code>CLOSED</code> sentinel if <code>@closed</code> and this worker has not yet
+been told. This wakes the worker so it can transition into a
+&quot;drain pending and exit&quot; state.</li>
+<li>Otherwise, <code>@cond.wait</code>.</li>
+</ol>
+
+<p>The <code>accept_calls</code> flag is the worker&#39;s way of saying &quot;I&#39;ve started
+stopping; don&#39;t hand me new work.&quot; Once <code>CLOSED</code> has been delivered the
+worker sets <code>stopping = true</code> and passes <code>accept_calls: false</code> on every
+subsequent <code>dequeue</code>.</p>
+
+<h3 id="8-4-fiber-lifecycle-in-threaded-mode">8.4 Fiber lifecycle in threaded mode</h3>
+
+<p>When a worker picks up a <code>CallMessage</code>:</p>
+
+<ol>
+<li><code>start_worker_fiber</code> creates a fiber whose body is <code>handle_method</code>.</li>
+<li>The fiber&#39;s <code>object_id</code> is the <code>fiber_id</code>. The worker registers it
+with <code>@dispatcher.register_fiber(fiber_id, worker_num)</code> and stores it
+in a local <code>pending</code> hash.</li>
+<li>The worker resumes the fiber. If the fiber completes synchronously
+(no block yield), the worker removes it from <code>pending</code> and calls
+<code>@dispatcher.unregister_fiber</code>.</li>
+<li>If the fiber suspends (via <code>Fiber.yield</code> in <code>fiber_yield_block</code>), it
+remains in <code>pending</code> and is left registered. The worker goes back to
+the dispatch loop.</li>
+<li>Eventually a <code>FiberReturnMessage</code> / <code>FiberExceptionMessage</code> arrives at the
+server&#39;s main port. The main loop calls <code>@dispatcher.enqueue_fiber_resume</code>,
+which looks up <code>@fiber_to_worker[fiber_id]</code> and pushes onto the right
+per-worker queue.</li>
+<li>The owning worker dequeues it, resumes the fiber, and either completes it
+or suspends it again.</li>
+</ol>
+
+<p>If a fiber-resume arrives for a <code>fiber_id</code> that is no longer registered,
+<code>enqueue_fiber_resume</code> returns <code>false</code> and the main loop logs
+&quot;Discarding orphan fiber resume.&quot; This can happen if the worker that
+owned the fiber crashed, since <code>cleanup_worker</code> unregisters all pending
+fibers before the server observes <code>WorkerStoppedMessage</code>.</p>
+
+<h3 id="8-5-why-the-main-loop-still-routes-fiber-resumes">8.5 Why the main loop still routes fiber resumes</h3>
+
+<p>An alternative would be for workers to receive their fiber resumes
+directly (e.g., each worker owning a port). The current design keeps
+everything flowing through <code>@port</code> so there is exactly one place the
+server receives messages. That simplifies:</p>
+
+<ul>
+<li>Shutdown: draining one port drains everything.</li>
+<li>Logging: one locus of message observation.</li>
+<li>Caller-side symmetry: callers only need to know one port.</li>
+</ul>
+
+<p>The cost is an extra hop (main loop → dispatcher → worker), but this is
+cheap because the main loop does no work beyond enqueue.</p>
+
+<hr>
+
+<h2 id="9-server-lifecycle">9. Server lifecycle</h2>
+
+<p><code>Server#run</code> is the top of the state machine:</p>
+
+<pre class="code ruby"><code class="ruby"><span class='kw'>def</span> <span class='id identifier rubyid_run'>run</span>
+  <span class='id identifier rubyid_receive_remote_object'>receive_remote_object</span> <span class='kw'>if</span> <span class='ivar'>@isolated</span>
+  <span class='id identifier rubyid_start_workers'>start_workers</span> <span class='kw'>if</span> <span class='ivar'>@threads_requested</span>
+  <span class='id identifier rubyid_main_loop'>main_loop</span>
+  <span class='id identifier rubyid_stop_workers'>stop_workers</span> <span class='kw'>if</span> <span class='ivar'>@threads_requested</span>
+  <span class='id identifier rubyid_cleanup'>cleanup</span>
+  <span class='ivar'>@object</span>
+<span class='kw'>rescue</span> <span class='const'>Exception</span> <span class='op'>=&gt;</span> <span class='id identifier rubyid_e'>e</span>
+  <span class='ivar'>@crash_exception</span> <span class='op'>=</span> <span class='id identifier rubyid_e'>e</span>
+  <span class='ivar'>@object</span>
+<span class='kw'>ensure</span>
+  <span class='id identifier rubyid_crash_cleanup'>crash_cleanup</span> <span class='kw'>if</span> <span class='ivar'>@crash_exception</span>
+<span class='kw'>end</span>
+</code></pre>
+
+<p>Expressed as phases:</p>
+
+<pre class="code ruby"><code class="ruby">  ┌────────────────────┐
+  │   init (isolated)  │  receive_remote_object
+  └─────────┬──────────┘
+            ▼
+  ┌────────────────────┐
+  │    start workers   │  only if threads &gt; 0
+  └─────────┬──────────┘
+            ▼
+  ┌────────────────────┐  accepts CallMessage, FiberReturn/Exception,
+  │    RUNNING         │  StopMessage, JoinMessage, WorkerStoppedMessage.
+  │    (main_loop)     │  Exits on: StopMessage, or unexpected worker death.
+  └─────────┬──────────┘
+            ▼
+  ┌────────────────────┐  sequential: drain_pending_fibers (inline);
+  │    STOPPING        │  threaded:   stop_workers (close dispatcher,
+  │                    │              wait for WorkerStoppedMessage from each).
+  └─────────┬──────────┘  Refuses new calls with StoppedError.
+            ▼
+  ┌────────────────────┐  Close @port, drain remaining messages,
+  │    CLEANUP         │  respond to outstanding join requests.
+  └─────────┬──────────┘
+            ▼
+         (return @object — terminal value for the Ractor in isolated mode)
+
+  ──────────────────────────── crash path ──────────────────────────────
+  Any uncaught exception from the above jumps to:
+  ┌────────────────────┐  crash_cleanup:
+  │    CRASH CLEANUP   │   • abort_pending_fibers (sequential)
+  │    (ensure block)  │   • drain_dispatcher_after_crash (threaded)
+  └────────────────────┘   • drain_inbox_after_crash
+                           • join_workers_after_crash (threaded)
+                           • respond to join requests
+</code></pre>
+
+<h3 id="9-1-running-phase-main_loop">9.1 Running phase — <code>main_loop</code></h3>
+
+<p><code>Server#main_loop</code> reads from <code>@port.receive</code> and dispatches on message type:</p>
+
+<ul>
+<li> <code>CallMessage</code> → <code>dispatch_call</code>, which in sequential mode starts a new
+fiber inline (<code>start_method_fiber</code>), or in threaded mode pushes onto
+the dispatcher&#39;s shared queue (<code>@dispatcher.enqueue_call</code>).</li>
+<li> <code>FiberReturnMessage</code> / <code>FiberExceptionMessage</code> → <code>dispatch_fiber_resume</code>,
+which resumes the fiber inline (sequential) or enqueues onto the
+correct per-worker queue (threaded).</li>
+<li> <code>JoinMessage</code> → added to <code>@join_requests</code>; reply is sent when the
+server finishes.</li>
+<li> <code>StopMessage</code> → initiates graceful shutdown. In sequential mode, the
+main loop first calls <code>drain_pending_fibers</code> to let any suspended
+methods complete.</li>
+<li> <code>WorkerStoppedMessage</code> → an <em>unexpected</em> worker death during running
+phase. Treat it as a fatal signal and break out of the loop. The
+cleanup code down-stream takes over.</li>
+</ul>
+
+<h3 id="9-2-stopping-phase-sequential-vs-threaded">9.2 Stopping phase — sequential vs threaded</h3>
+
+<p>In sequential mode, the stopping logic is just <code>drain_pending_fibers</code>:
+continue to receive messages on <code>@port</code>, refuse any new <code>CallMessage</code>,
+forward <code>FiberReturnMessage</code>/<code>FiberExceptionMessage</code> to their fibers,
+queue any late <code>JoinMessage</code>s, and exit once <code>@pending_fibers</code> is empty.</p>
+
+<p>In threaded mode, <code>stop_workers</code> is more involved:</p>
+
+<ol>
+<li>Call <code>@dispatcher.close</code>, which flips <code>@closed</code> and drains (returns)
+any <code>CallMessage</code>s that were queued but never picked up. Those
+messages are refused with <code>StoppedError</code>. This is important: without
+this step, callers whose messages arrived <em>after</em> stop but before a
+worker could dequeue would hang forever.</li>
+<li>Each worker, on its next <code>dequeue</code>, receives the one-shot <code>CLOSED</code>
+sentinel. It sets <code>stopping = true</code> and stops accepting new calls.</li>
+<li>The main loop continues to receive messages, but now it must:
+
+<ul>
+<li> Refuse any <code>CallMessage</code> that still arrives.</li>
+<li> Forward <code>FiberReturnMessage</code>/<code>FiberExceptionMessage</code> through the
+dispatcher so that workers can finish their suspended methods.</li>
+<li> Acknowledge <code>WorkerStoppedMessage</code> and decrement <code>@active_workers</code>.</li>
+<li> Queue late <code>JoinMessage</code>s.</li>
+</ul></li>
+<li>Loop until all workers have reported stopped.</li>
+</ol>
+
+<h3 id="9-3-cleanup-phase">9.3 Cleanup phase</h3>
+
+<p><code>cleanup</code> closes <code>@port</code> and then drains anything left in it. Callers
+whose messages arrive after port close get <code>Ractor::ClosedError</code> on
+send — nothing the server can do for them. But any <code>CallMessage</code> that
+was already in the port before close is still refused, and any late
+<code>JoinMessage</code> is answered immediately.</p>
+
+<p>Finally, all queued join requests get a <code>JoinReplyMessage</code>.</p>
+
+<h3 id="9-4-why-main_loop-breaks-out-on-unexpected-worker-death">9.4 Why <code>main_loop</code> breaks out on unexpected worker death</h3>
+
+<p>The <code>WorkerStoppedMessage</code> in the running-phase branch of <code>main_loop</code> covers
+the case where a worker thread dies <em>without</em> going through the graceful stop
+path, typically because it raised an exception we did not catch. When this
+happens the server declares the situation unsafe: the invariant &quot;every pending
+fiber has a living worker to resume it&quot; is broken, and rather than try to fix
+it in place (by e.g. restarting the worker), the server shuts down. This is
+opinionated: the author chose reliability of shutdown semantics over continued
+availability of other workers.</p>
+
+<h3 id="9-5-join">9.5 Join</h3>
+
+<p><code>Wrapper#join</code> has two implementations:</p>
+
+<ul>
+<li> <strong>Isolated mode:</strong> <code>@ractor.join</code> — relies on the underlying
+<code>Ractor#join</code> to block until the server Ractor terminates.</li>
+<li> <strong>Local mode:</strong> there is no Ractor to join, so the wrapper sends a
+<code>JoinMessage</code> with a fresh reply port and waits for
+<code>JoinReplyMessage</code>. The server adds the reply port to its
+<code>@join_requests</code> list and replies in cleanup or crash cleanup.</li>
+</ul>
+
+<p>The docstring on <code>Wrapper#join</code> notes an important deviation from
+<code>Thread#join</code> / <code>Ractor#join</code>: a crashed wrapper does <em>not</em> propagate
+its exception out of <code>join</code>. The reasoning is that wrapper crashes are
+typically internal bugs (in the server&#39;s dispatch code, not in the
+wrapped object&#39;s methods), and we already deliver <code>CrashedError</code> to any
+pending caller; re-raising in <code>join</code> would just produce a duplicate
+error at an awkward point.</p>
+
+<h3 id="9-6-recovering-the-object">9.6 Recovering the object</h3>
+
+<p>In isolated mode, <code>@ractor.value</code> returns the wrapped object after the
+Ractor has terminated. <code>Server#run</code> is written to always return <code>@object</code>
+from both the success and rescue paths, so even a crashed server
+surrenders the object (modulo Ruby&#39;s own post-mortem rules). This is
+intentional: the object is yours, you may want to clean it up yourself,
+and the wrapper should not hold it hostage.</p>
+
+<p>In local mode, <code>recover_object</code> raises. The object never moved, so there is
+nothing to recover.</p>
+
+<hr>
+
+<h2 id="10-graceful-stop-and-crash-cleanup-in-detail">10. Graceful stop and crash cleanup in detail</h2>
+
+<p>Graceful stop is covered in §9. This section focuses on what happens
+when something goes wrong.</p>
+
+<h3 id="10-1-what-constitutes-a-crash">10.1 What constitutes a crash</h3>
+
+<p>Any uncaught exception inside <code>Server#run</code> ends up in the <code>rescue</code> clause.
+This can originate from:</p>
+
+<ul>
+<li> A bug in the server&#39;s dispatch code itself.</li>
+<li> An unexpected <code>Ractor::ClosedError</code> when the port is already closed
+(though most sites catch this explicitly).</li>
+<li> An exception during fiber management.</li>
+</ul>
+
+<p>Notably, exceptions raised by the <em>wrapped object&#39;s methods</em> are <strong>not</strong>
+crashes. They are caught by <code>handle_method</code>&#39;s <code>rescue ::Exception</code> clause and
+converted into an <code>ExceptionMessage</code> sent to the caller. The server itself
+stays alive.</p>
+
+<p>A worker thread crash is detected via <code>WorkerStoppedMessage</code> (its normal stop
+notification) arriving during the running phase, or via the worker&#39;s own
+<code>ensure</code> block catching its exception (see <code>worker_loop</code>&#39;s <code>crash_exception</code>
+path).</p>
+
+<h3 id="10-2-crash_cleanup">10.2 <code>crash_cleanup</code></h3>
+
+<p>The goal of <code>crash_cleanup</code> is to deliver a <code>CrashedError</code> to every caller who
+would otherwise hang, and to unblock any join waiters. It does as much as
+possible, swallowing further errors, because by this point the server is
+definitely going away and best-effort is the only realistic policy.</p>
+
+<p>Steps:</p>
+
+<ol>
+<li><strong>Threaded mode:</strong> <code>drain_dispatcher_after_crash</code> calls
+<code>@dispatcher.crash_close</code>. This (a) sets <code>@crashed</code>, so future
+<code>dequeue</code> calls return <code>TERMINATE</code> on empty per-worker queues,
+causing workers to exit instead of waiting forever; and (b) returns
+the shared queue&#39;s undispatched messages so the server can send
+<code>CrashedError</code> to each.</li>
+<li><strong>Sequential mode:</strong> <code>abort_pending_fibers</code> calls <code>fiber.raise(error)</code>
+on each suspended fiber. The exception emerges from the fiber&#39;s
+<code>Fiber.yield</code> call; <code>handle_method</code>&#39;s <code>rescue ::Exception</code> catches it
+and sends an <code>ExceptionMessage(CrashedError)</code> to the fiber&#39;s reply
+port. So the caller observes <code>CrashedError</code> — the same error class
+they would get in threaded mode.</li>
+<li><code>drain_inbox_after_crash</code> closes <code>@port</code> and drains anything left,
+sending <code>CrashedError</code> to any <code>CallMessage</code> senders and
+<code>JoinReplyMessage</code> to any <code>JoinMessage</code> senders.</li>
+<li><strong>Threaded mode:</strong> <code>join_workers_after_crash</code> waits for all workers to
+finish. Workers&#39; own <code>cleanup_worker</code> runs in their ensure blocks: they
+abort <em>their</em> pending fibers (delivering <code>CrashedError</code> to each caller),
+unregister the fibers, and make a best effort to send
+<code>WorkerStoppedMessage</code> back to the main loop.</li>
+<li>Any remaining <code>@join_requests</code> are answered.</li>
+</ol>
+
+<h3 id="10-3-why-fiber-raise-for-sequential-cleanup">10.3 Why <code>fiber.raise</code> for sequential cleanup?</h3>
+
+<p>It might be simpler to iterate over <code>@pending_fibers</code> and send <code>CrashedError</code>
+directly to each fiber&#39;s reply port. The reason <code>fiber.raise</code> is preferred is
+that it runs the fiber&#39;s rescue and ensure blocks, allowing the method (and any
+wrapper code around it) to clean up, e.g., releasing locks, closing file
+handles opened inside the method. This better respects the wrapped object&#39;s
+invariants at the cost of being slightly slower and more fallible.</p>
+
+<h3 id="10-4-the-best-effort-nature-of-cleanup">10.4 The best-effort nature of cleanup</h3>
+
+<p><code>crash_cleanup</code> wraps almost everything in <code>rescue ::Exception</code>. This is
+deliberate: we are already handling a crash and the priority is to get
+through the cleanup steps without aborting partway. A lost <code>CrashedError</code>
+delivery is regrettable but tolerable; a stuck wrapper is not.</p>
+
+<hr>
+
+<h2 id="11-design-trade-offs-and-known-limitations">11. Design trade-offs and known limitations</h2>
+
+<p>This section collects the trade-offs already mentioned throughout,
+plus a few others, in one place for the benefit of readers deciding
+whether the library fits their use case.</p>
+
+<h3 id="11-1-re-entrancy-from-nested-fibers-or-spawned-threads-can-deadlock">11.1 Re-entrancy from nested fibers or spawned threads can deadlock</h3>
+
+<p>The fiber-suspend path is only available when the block invocation
+happens on the same fiber that started the method. Nested fibers
+(most visibly inside <code>Enumerator</code>) and spawned threads fall back to
+the blocking path, which does not release the server to service
+further messages. If such a block tries to re-enter the wrapper, the
+re-entering call arrives at <code>@port</code> but nothing can pick it up — the
+server is blocked inside the very call that sent it. This deadlocks.</p>
+
+<p>Mitigations:</p>
+
+<ul>
+<li> Configure the method with <code>block_environment: :wrapped</code> if the
+block is self-contained.</li>
+<li> Avoid re-entering the wrapper from blocks called from within
+Enumerator generators or user-spawned threads.</li>
+<li> In threaded mode the blast radius is one worker, not the whole
+server. With enough workers this is survivable.</li>
+</ul>
+
+<h3 id="11-2-blocks-configured-as-caller-cannot-outlive-the-method-call">11.2 Blocks configured as <code>:caller</code> cannot outlive the method call</h3>
+
+<p>The synthetic proc generated by <code>make_block</code> relies on the caller still
+being in its <code>Wrapper#call</code> reply loop. If the wrapped object saves the
+block (as a callback, say) and invokes it later, the caller is long
+gone and the fiber-yield / blocking-yield both have no one to reply.
+The library does not currently detect this at save time — the failure
+manifests at invocation time when the message goes nowhere.</p>
+
+<p>If you need to register a callback, prefer <code>block_environment: :wrapped</code>
+so the block travels as a <code>Ractor.shareable_proc</code> and is invoked
+in-place.</p>
+
+<h3 id="11-3-exceptions-lose-their-backtrace">11.3 Exceptions lose their backtrace</h3>
+
+<p>As of Ruby 4.0, exceptions transferred between Ractors are always
+copied (not moved) and the backtrace is cleared. This is a Ruby bug
+(tracked at bugs.ruby-lang.org issue 21818) that the library cannot
+work around, and it applies both to exceptions raised by the wrapped
+method and to exceptions raised by caller-side blocks.</p>
+
+<h3 id="11-4-non-shareable-non-movable-types-cannot-cross-the-boundary">11.4 Non-shareable, non-movable types cannot cross the boundary</h3>
+
+<p>Ractor&#39;s own rules apply. Threads, procs (non-shareable), backtraces,
+and a few other types cannot be passed as arguments or returned as
+values. <code>:move</code> can help with some cases (large strings, arrays of
+mutable values), but some types cannot be moved at all.</p>
+
+<h3 id="11-5-worker-count-is-a-hard-ceiling-on-parallelism">11.5 Worker count is a hard ceiling on parallelism</h3>
+
+<p>The <code>threads</code> setting is the maximum number of concurrent method bodies.
+The library does not grow or shrink the pool. Sizing it right requires
+knowing both the workload&#39;s natural concurrency and, if you are using
+blocking-fallback paths, the expected number of simultaneously-blocked
+workers.</p>
+
+<p>Suspended fibers (the common re-entrancy case) do <em>not</em> occupy a worker,
+so re-entrancy depth does not need to be part of the calculation.</p>
+
+<h3 id="11-6-no-method-level-timeouts">11.6 No method-level timeouts</h3>
+
+<p>A misbehaving wrapped method that never returns will block its worker
+(or the server itself, in sequential mode) indefinitely. There is no
+built-in timeout. Callers can avoid their own indefinite wait by
+implementing timeouts around their stub calls, but the server-side
+work will still occupy the thread.</p>
+
+<h3 id="11-7-experimental-status">11.7 Experimental status</h3>
+
+<p>The library is self-described as experimental, and the README repeats
+this warning prominently. This is true both of the library and of
+Ractors in general in Ruby 4.0. Expect behavior to evolve as Ruby&#39;s
+Ractor implementation matures; internals may change in lock-step.</p>
+
+<hr>
+
+<h2 id="12-putting-it-together-a-worked-walkthrough">12. Putting it together — a worked walkthrough</h2>
+
+<p>To make all of the above concrete, here is the full story for a single
+call to <code>stub.find_by_id(42)</code> against a SQLite3 wrapper configured with
+<code>use_current_ractor: true, threads: 2</code>, from a caller in a different
+Ractor. Assume <code>:caller</code> block environment and no block is passed in
+this example.</p>
+
+<ol>
+<li><strong>Caller Ractor invokes <code>stub.find_by_id(42)</code>.</strong> <code>Stub#method_missing</code>
+forwards to <code>Wrapper#call(:find_by_id, 42)</code>.</li>
+<li><strong><code>Wrapper#call</code> prepares a <code>CallMessage</code>.</strong> It creates a fresh
+<code>Ractor::Port</code> as <code>reply_port</code>, generates a <code>transaction</code> id, fetches
+the per-method <code>MethodSettings</code>, computes <code>block_arg = nil</code> (no block
+was given), and sends the <code>CallMessage</code> on <code>@port</code>.</li>
+<li><strong>Server&#39;s main loop (running in a Thread in the host Ractor)
+receives the message.</strong> It calls <code>dispatch_call</code>, which since threads
+were requested, calls <code>@dispatcher.enqueue_call(message)</code>. The
+dispatcher pushes onto its shared queue and broadcasts.</li>
+<li><strong>Some worker (say worker 0) dequeues <code>[:call, message]</code>.</strong> It calls
+<code>start_worker_fiber</code>, which creates a fiber around
+<code>handle_method(message, worker_num: 0)</code>, registers the fiber with the
+dispatcher, and resumes it.</li>
+<li><strong>Inside the fiber, <code>handle_method</code> calls
+<code>@object.__send__(:find_by_id, 42)</code>.</strong> No block is involved, so
+<code>make_block</code> returns <code>nil</code>. The DB object does its work and returns a row.</li>
+<li><strong><code>handle_method</code> sends a <code>ReturnMessage(row)</code> to
+<code>message.reply_port</code>.</strong> The fiber completes. The worker removes it
+from its local <code>pending</code> and unregisters from the dispatcher. The
+worker loops back to <code>@dispatcher.dequeue</code>.</li>
+<li><strong>Caller&#39;s <code>Wrapper#call</code> <code>receive</code>s the reply.</strong> Its loop matches
+<code>ReturnMessage</code>, returns <code>row</code>. The <code>ensure</code> block closes the
+<code>reply_port</code>. <code>Stub#method_missing</code> returns <code>row</code> to the caller.</li>
+</ol>
+
+<p>Now insert a block: <code>stub.find_by_id(42) { |r| transform(r) }</code>.</p>
+
+<ul>
+<li> Between steps 5 and 6, the wrapped method invokes the block. Because
+<code>block_environment: :caller</code> is the default, <code>make_block</code> has wrapped
+it in a proc that:
+
+<ul>
+<li> Substitutes the stub for any argument equal to <code>@object</code>.</li>
+<li> Checks that <code>Fiber.current</code> equals the fiber that <code>handle_method</code>
+started in. It does, so:</li>
+<li> Sends a <code>FiberYieldMessage(args: [row], kwargs: {}, fiber_id: F)</code>
+to <code>reply_port</code>.</li>
+<li> Calls <code>Fiber.yield</code>.</li>
+</ul></li>
+<li> Worker 0 is now free and returns to the dispatch loop (the fiber is
+suspended but registered).</li>
+<li> The caller&#39;s <code>call</code> loop receives <code>FiberYieldMessage</code>, runs <code>handle_yield</code>,
+which calls the block, captures <code>transform(row)</code>, and sends a
+<code>FiberReturnMessage(transformed, F)</code> to the server&#39;s main <code>@port</code>.</li>
+<li> The main loop receives the <code>FiberReturnMessage</code>, calls
+<code>dispatch_fiber_resume</code>, which goes through the dispatcher:
+<code>@dispatcher.enqueue_fiber_resume(message)</code> looks up
+<code>@fiber_to_worker[F]</code> (which is worker 0), pushes onto worker 0&#39;s
+per-worker queue, and broadcasts.</li>
+<li> Worker 0&#39;s <code>dequeue</code> finds the per-worker queue non-empty, returns
+<code>[:resume, message]</code>. <code>resume_worker_fiber</code> resumes fiber F with
+the message. Inside <code>fiber_yield_block</code>, <code>Fiber.yield</code> returns the
+<code>FiberReturnMessage</code>; the block-proc unwraps <code>.value</code> and returns
+<code>transformed</code> to the wrapped method.</li>
+<li> The wrapped method completes, returns, <code>handle_method</code> sends
+<code>ReturnMessage</code> back to <code>reply_port</code>. The fiber ends, the worker
+cleans it up and goes back to the dispatch loop.</li>
+<li> The caller&#39;s <code>call</code> loop finally receives <code>ReturnMessage</code> and returns.</li>
+</ul>
+
+<p>This is the full dance for one call with one block invocation. Every step can
+be logged, and the <code>transaction</code> id ties them together in the output.</p>
+
+<hr>
+
+<h2 id="13-summary">13. Summary</h2>
+
+<p><code>Ractor::Wrapper</code> achieves shared access to a non-shareable object by:</p>
+
+<ul>
+<li> Running the object in a controlled server (either a dedicated Ractor
+or a set of threads in the creating Ractor).</li>
+<li> Exposing a frozen, shareable <code>Stub</code> that forwards calls via a
+message-passing protocol with per-call reply ports.</li>
+<li> Using fibers to run method bodies so that they can suspend cleanly
+when caller-side blocks need to execute, without blocking the
+server&#39;s main message loop.</li>
+<li> Using a custom <code>Dispatcher</code> in threaded mode that routes new calls
+through a shared queue but fiber resumes through per-worker queues,
+preserving Ruby&#39;s fiber-to-thread affinity.</li>
+<li> Falling back to a blocking path when a block is invoked from a nested
+fiber or spawned thread, trading re-entrancy for continued functionality.</li>
+<li> Modeling configuration as a frozen value object that travels with
+each call, keeping the server stateless with respect to settings.</li>
+<li> Providing a carefully staged lifecycle (running → stopping →
+cleanup) with a separate crash-cleanup path that makes a
+best-effort attempt to unblock every pending caller and join
+waiter when something goes wrong.</li>
+</ul>
+
+<p>The net effect is a library that tries to make using a non-shareable object
+from multiple Ractors look as close as possible to calling it directly, while
+being honest about the edges where the abstraction leaks.</p>
+</div></div>
+
+      <div id="footer">
+  Generated on Sun Apr 26 06:13:07 2026 by
+  <a href="https://yardoc.org" title="Yay! A Ruby Documentation Tool" target="_parent">yard</a>
+  0.9.43 (ruby-4.0.3).
+</div>
+
+    </div>
+  </body>
+</html>
