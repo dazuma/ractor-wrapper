@@ -1,5 +1,10 @@
 # Release History
 
+### v0.5.0 / 2026-04-26
+
+* ADDED: Reworked server flow to use fibers, to reduce deadlocks on nested calls
+* DOCS: Added design doc
+
 ### v0.4.0 / 2026-03-30
 
 This release includes two major changes: it greatly improves robustness in the case of server crashes, and it reworks the method call configuration interface. This involves several breaking changes, and I expect the interface will continue to be a bit unstable for now as I'm working through use cases and edge cases. The README has also been expanded to include more information on the configuration options and the known issues.
