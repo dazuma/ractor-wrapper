@@ -3,6 +3,7 @@
 require "minitest/autorun"
 require "minitest/focus"
 require "minitest/rg"
+
 require "ractor/wrapper"
 
 # Create and throw away an initial Ractor, which will cause some versions of
@@ -19,6 +20,7 @@ class CrashingJoinMessage < ::Ractor::Wrapper::JoinMessage
   end
 end
 
+# An object with a variety of methods, to test various wrapping cases.
 class RemoteObject
   def echo_args(*args, **kwargs)
     "#{args}, #{kwargs}"

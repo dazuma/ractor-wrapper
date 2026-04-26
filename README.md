@@ -1,6 +1,6 @@
 # Ractor::Wrapper
 
-Ractor::Wrapper is an experimental class that wraps a non-shareable object in
+`Ractor::Wrapper` is an experimental class that wraps a non-shareable object in
 an actor, allowing multiple Ractors to access it concurrently.
 
 **WARNING:** This is an experimental library, and currently _not_ recommended
@@ -23,9 +23,9 @@ require "ractor/wrapper"
 
 You can then create wrappers for objects. See the example below.
 
-Ractor::Wrapper requires Ruby 4.0.0 or later.
+`Ractor::Wrapper` requires Ruby 4.0.0 or later.
 
-## What is Ractor::Wrapper?
+## What is `Ractor::Wrapper`?
 
 For the most part, unless an object is _shareable_, which generally means
 deeply immutable along with a few other restrictions, it cannot be accessed
@@ -43,7 +43,7 @@ such as a database connection.
     |                   | fails |                |
     +-------------------+       +----------------+
 
-Ractor::Wrapper makes it possible for an ordinary non-shareable object to
+`Ractor::Wrapper` makes it possible for an ordinary non-shareable object to
 be accessed from multiple Ractors. It does this by "wrapping" the object with
 a shareable proxy.
 
@@ -66,13 +66,13 @@ fully transparent. Behind the scenes, the wrapper "runs" the wrapped object in
 a controlled single-Ractor environment, and uses port messaging to communicate
 method calls, arguments, and return values between Ractors.
 
-Ractor::Wrapper can be used to adapt non-shareable objects to a multi-Ractor
+`Ractor::Wrapper` can be used to adapt non-shareable objects to a multi-Ractor
 world. It can also be used to implement a simple actor by writing a "plain"
 Ruby object and wrapping it with a Ractor.
 
 ## Examples
 
-Below are some illustrative examples showing how to use Ractor::Wrapper.
+Below are some illustrative examples showing how to use `Ractor::Wrapper`.
 
 ### Net::HTTP example
 
@@ -195,9 +195,9 @@ wrapper.join
 
 ### Simple actor example
 
-The following example demonstrates how to use Ractor::Wrapper to implement an
+The following example demonstrates how to use `Ractor::Wrapper` to implement an
 actor as a plain Ruby object. Focus on writing functionality as methods, and
-let Ractor::Wrapper handle all the messaging logic.
+let `Ractor::Wrapper` handle all the messaging logic.
 
 ```ruby
 # Simple actor example
@@ -246,9 +246,9 @@ calc_actor.join
 
 ## Configuring a wrapper
 
-Ractor::Wrapper supports a fair amount of configuration, which may be needed in
-order to ensure good behavior of the wrapped object. You can configure many
-aspects of Ractor::Wrapper by passing keyword arguments to its constructor.
+`Ractor::Wrapper` supports a fair amount of configuration, which may be needed
+in order to ensure good behavior of the wrapped object. You can configure many
+aspects of `Ractor::Wrapper` by passing keyword arguments to its constructor.
 Alternatively, you can pass a block to the constructor; the constructor will
 yield a configuration interface to your block, letting you configure the
 wrapper's behavior in detail.
@@ -340,7 +340,7 @@ pending method calls, and putting the wrapper in a state where it will refuse
 new calls. Any additional method calls will cause a
 `Ractor::Wrapper::StoppedError` to be raised.
 
-Ractor::Wrapper also provides a `join` method that can be called to wait for
+`Ractor::Wrapper` also provides a `join` method that can be called to wait for
 the wrapper to complete its shutdown.
 
 ### Wrapped object access
@@ -361,12 +361,12 @@ Ractor that subsequently requests the object will get an exception instead.
 
 In "current Ractor" mode, the object will never have been moved to a different
 Ractor, so any pre-existing references (in the original Ractor) will still be
-valid. In this case, `recover_object` is not necessary and will not be
-available at all.
+valid. In this case, `recover_object` is not necessary and will raise an
+exception if called.
 
 ### Error handling
 
-Ractor::Wrapper provides fairly robust handling of errors. If a method call
+`Ractor::Wrapper` provides fairly robust handling of errors. If a method call
 raises an exception, the exception will be passed back to the caller and raised
 there. In the unlikely event that the wrapper itself crashes, it goes through a
 very thorough clean-up process and makes every effort to shut down gracefully,
@@ -380,7 +380,7 @@ a common pattern in Ruby and is used to allow "chaining" interfaces. However,
 you generally cannot return `self` from a wrapped object because, depending on
 the communication configuration, you'll either get a *copy* of `self`, or
 you'll *move* the object out of the wrapper, thus breaking the wrapper. Thus,
-Ractor::Wrapper explicitly detects when methods return `self`, and instead
+`Ractor::Wrapper` explicitly detects when methods return `self`, and instead
 replaces it with the wrapper's stub object. The stub is shareable, and designed
 to have the same usage as the original object, so this should work for most use
 cases.
@@ -388,10 +388,10 @@ cases.
 ## Known issues
 
 Ractors are in general somewhat "bolted-on" to Ruby, and there are a lot of
-caveats to their use. This also applies to Ractor::Wrapper, which itself is
+caveats to their use. This also applies to `Ractor::Wrapper`, which itself is
 essentially a workaround to the fact that Ruby has a lot of use cases that
 simply don't play well in a Ractor world. Here we'll discuss some of the
-caveats and known issues with Ractor::Wrapper.
+caveats and known issues with `Ractor::Wrapper`.
 
 ### Data communication issues
 
@@ -407,14 +407,14 @@ One particular case of note is exception objects, which one might expect to be
 shareable, but are not. Furthermore, they cannot be moved, and even copying an
 exception has issues (in particular the backtrace of a copy gets cleared out).
 See https://bugs.ruby-lang.org/issues/21818 for more info. When a method raises
-an exception, Ractor::Wrapper communicates that exception via copying, which
+an exception, `Ractor::Wrapper` communicates that exception via copying, which
 means that currently backtraces will not be present.
 
 ### Blocks
 
-Ruby blocks pose particular challenges for Ractor::Wrapper because of their
+Ruby blocks pose particular challenges for `Ractor::Wrapper` because of their
 semantics and some of their common usage patterns. We've already seen above
-that Ractor::Wrapper can run them either in the caller's context or in the
+that `Ractor::Wrapper` can run them either in the caller's context or in the
 wrapped object's context, which may limit what the block can do. Additionally,
 the following restrictions apply to blocks:
 
@@ -432,27 +432,44 @@ through a wrapper.
 In Ruby, it is legal (although not considered very good practice) to do a
 non-local `return` from inside a block. Assuming the block isn't being defined
 via a lambda, this causes a return from the method *surrounding* the call that
-includes the block. Ractor::Wrapper cannot reproduce this behavior. Attempting
-to `return` within a block that was passed to Ractor::Wrapper will result in an
-exception.
+includes the block. However, `Ractor::Wrapper` cannot reproduce this behavior.
+Attempting to `return` within a block that was passed to `Ractor::Wrapper` will
+result in an exception.
 
-### Re-entrancy via blocks
+### Block re-entrancy in a separate Thread/Fiber
 
-One final known issue with Ractor::Wrapper is that it does not currently handle
-re-entrancy resulting from a block making another call to the object. That is,
-if a method on a wrapper is called, and it yields to a block that runs back in
-the caller's context, and that block then makes another method call to the same
-wrapper, now there's a new method call request when the first method is still
-being handled (and blocked because it's yielding to the block). Unless the
-wrapper is configured with enough threads that another thread can pick up the
-new method call, this will deadlock the wrapper: the original method call is
-blocked because the yield is not complete, but the yield will never complete
-because the new method cannot run until the original method has completed.
+One final known corner case has to do with block re-entrancy, i.e. calling a
+method *from within a block passed to another call to the same object*. This
+would mean that there are two "active" method calls to the object at once: one
+made while another is "suspended" because it has yielded to the block.
 
-I believe this issue is solvable by retooling the internal method scheduling to
-use fibers, and I have filed a to-do item to address it in the future
-(https://github.com/dazuma/ractor-wrapper/issues/12). Until then, I do not
-recommend making additional calls to a wrapper from within a yielded block.
+```ruby
+stub.method_with_block do
+  stub.another_method
+end
+```
+
+In most cases, the wrapper handles this case properly, even in sequential mode
+when it has no concurrency. Internally, it uses fibers to track each method
+call, and it yields the fiber when yielding to a block. However, if the
+"internal" method call itself is done in a separate Fiber or Thread, this would
+break the internal fiber tracking. In such a case, the wrapper falls back to a
+"blocking" model where it depends on concurrency to handle the simultaneous
+method calls. If run in sequential mode, or if not enough worker threads are
+available, this can deadlock.
+
+```ruby
+# Can deadlock if the wrapper was created in sequential mode
+stub.method_with_block do
+  t = Thread.new do
+    stub.another_method
+  end
+  t.join
+end
+```
+
+To avoid this issue, do not call methods on the same wrapper from within a
+separate Thread or Fiber spawned inside a block passed to that wrapper.
 
 ## Contributing
 
