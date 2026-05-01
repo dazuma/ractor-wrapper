@@ -17,7 +17,9 @@ require "ractor/wrapper/version"
   spec.license = "MIT"
   spec.homepage = "https://github.com/dazuma/ractor-wrapper"
 
-  spec.files = ::Dir.glob("lib/**/*.rb") + ::Dir.glob("*.md") + [".yardopts"]
+  spec.files = ::Dir.glob("lib/**/*.rb") +
+               (::Dir.glob("*.md") - ["CLAUDE.md", "AGENTS.md"]) +
+               [".yardopts"]
   spec.require_paths = ["lib"]
 
   spec.required_ruby_version = ">= 4.0"
