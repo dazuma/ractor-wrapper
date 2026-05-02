@@ -9,9 +9,9 @@ class Ractor
   # An experimental class that wraps a non-shareable object in an actor,
   # allowing multiple Ractors to access it concurrently.
   #
-  # WARNING: This is a highly experimental library, and currently _not_
-  # recommended for production use. (As of Ruby 4.0.0, the same can be said of
-  # Ractors in general.)
+  # WARNING: This is an experimental library, and currently _not_ recommended
+  # for production use. (As of Ruby 4.0.0, the same can be said of Ractors in
+  # general.)
   #
   # ## What is Ractor::Wrapper?
   #
@@ -21,12 +21,12 @@ class Ractor
   # to share a resource that is stateful. Such a resource must typically itself
   # be implemented as a Ractor and accessed via message passing.
   #
-  # Ractor::Wrapper makes it possible for an ordinary non-shareable object to
+  # `Ractor::Wrapper` makes it possible for an ordinary non-shareable object to
   # be accessed from multiple Ractors. It does this by "wrapping" the object
   # with an actor that listens for messages and invokes the object's methods in
   # a controlled single-Ractor environment. It then provides a stub object that
   # reproduces the interface of the original object, but responds to method
-  # calls by sending messages to the wrapper. Ractor::Wrapper can be used to
+  # calls by sending messages to the wrapper. `Ractor::Wrapper` can be used to
   # implement simple actors by writing "plain" Ruby objects, or to adapt
   # existing non-shareable objects to a multi-Ractor world.
   #
@@ -61,23 +61,19 @@ class Ractor
   #     # Here, we start two Ractors, and pass the stub to each one. Each
   #     # Ractor can simply call methods on the stub as if it were the original
   #     # connection object. Internally, of course, the calls are proxied to
-  #     # the original object via the wrapper, and execution is serialized.
+  #     # the original object via the wrapper, and execution is serialized. The
+  #     # returned Net::HTTPResponse values are passed through as the Ractor
+  #     # results.
   #     r1 = Ractor.new(wrapper.stub) do |stub|
-  #       5.times do
-  #         stub.get("/hello")
-  #       end
-  #       :ok
+  #       stub.get("/hello")
   #     end
   #     r2 = Ractor.new(wrapper.stub) do |stub|
-  #       5.times do
-  #         stub.get("/ruby")
-  #       end
-  #       :ok
+  #       stub.get("/ruby")
   #     end
   #
-  #     # Wait for the two above Ractors to finish.
-  #     r1.join
-  #     r2.join
+  #     # Wait for the two above Ractors to finish and retrieve their results.
+  #     r1_response = r1.value
+  #     r2_response = r2.value
   #
   #     # After you stop the wrapper, you can retrieve the underlying session
   #     # object and access it directly again.
@@ -140,39 +136,87 @@ class Ractor
   #     # method is not available.
   #     #     db2 = wrapper.recover_object  # <= raises Ractor::Wrapper::Error
   #
+  # ## Simple actor example
+  #
+  # The following example demonstrates using `Ractor::Wrapper` to implement an
+  # actor as a plain Ruby object. Focus on writing functionality as methods,
+  # and let `Ractor::Wrapper` handle the lifecycle and communication logic.
+  #
+  #     require "ractor/wrapper"
+  #
+  #     # A simple RPN-style calculatoir class
+  #     class SimpleCalculator
+  #       class EmptyStackError < StandardError
+  #       end
+  #
+  #       def initialize
+  #         @stack = []
+  #       end
+  #
+  #       def push(number)
+  #         @stack.push(number)
+  #         nil
+  #       end
+  #
+  #       def pop
+  #         raise EmptyStackError if @stack.empty?
+  #         @stack.pop
+  #       end
+  #
+  #       def add
+  #         push(pop + pop)
+  #         nil
+  #       end
+  #     end
+  #
+  #     # Create an actor based on SimpleCalculator
+  #     calc_actor = Ractor::Wrapper.new(SimpleCalculator.new)
+  #
+  #     # You can now send messages by calling methods
+  #     calc_stub = calc_actor.stub
+  #     calc_stub.push(2)
+  #     calc_stub.push(3)
+  #     calc_stub.add
+  #     sum = calc_stub.pop
+  #
+  #     # Stop the actor by calling async_stop
+  #     calc_actor.async_stop
+  #     # Wait for the actor to shut down
+  #     calc_actor.join
+  #
   # ## Features
   #
-  # *   Provides a Ractor-shareable method interface to a non-shareable object.
-  # *   Supports arbitrary method arguments and return values.
-  # *   Can be configured to run in its own isolated Ractor or in a Thread in
+  #  *  Provides a Ractor-shareable method interface to a non-shareable object.
+  #  *  Supports arbitrary method arguments and return values.
+  #  *  Can be configured to run in its own isolated Ractor or in a Thread in
   #     the current Ractor.
-  # *   Can be configured per method whether to copy or move arguments and
+  #  *  Can be configured per method whether to copy or move arguments and
   #     return values.
-  # *   Blocks can be run in the calling Ractor or in the object Ractor.
-  # *   Blocks running in the calling Ractor can re-enter the wrapper, calling
+  #  *  Blocks can be run in the calling Ractor or in the object Ractor.
+  #  *  Blocks running in the calling Ractor can re-enter the wrapper, calling
   #     other methods on it without deadlocking.
-  # *   Raises exceptions thrown by the method.
-  # *   Can serialize method calls for non-thread-safe objects, or run methods
+  #  *  Raises exceptions thrown by the method.
+  #  *  Can serialize method calls for non-thread-safe objects, or run methods
   #     concurrently in multiple worker threads for thread-safe objects.
-  # *   Can gracefully shut down the wrapper and retrieve the original object.
+  #  *  Can gracefully shut down the wrapper and retrieve the original object.
   #
   # ## Caveats
   #
-  # *   Certain types cannot be used as method arguments or return values
+  #  *  Certain types cannot be used as method arguments or return values
   #     because they cannot be moved between Ractors. As of Ruby 4.0.0, these
   #     include threads, backtraces, procs, and a few others.
-  # *   As of Ruby 4.0.0, any exceptions raised are always copied (rather than
+  #  *  As of Ruby 4.0.0, any exceptions raised are always copied (rather than
   #     moved) back to the calling Ractor, and the backtrace is cleared out.
   #     This is due to https://bugs.ruby-lang.org/issues/21818
-  # *   Blocks can be run "in place" (i.e. in the wrapped object context) only
+  #  *  Blocks can be run "in place" (i.e. in the wrapped object context) only
   #     if the block does not access any data outside the block. Otherwise, the
   #     block must be run in caller's context.
-  # *   Blocks configured to run in the caller's context can only be run while
+  #  *  Blocks configured to run in the caller's context can only be run while
   #     a method is executing. They cannot be "saved" as a proc to be run
   #     later unless they are configured to run "in place". In particular,
   #     using blocks as a syntax to define callbacks can generally not be done
   #     through a wrapper.
-  # *   Re-entrant calls from a block are not safe if the wrapped method
+  #  *  Re-entrant calls from a block are not safe if the wrapped method
   #     invoked the block from a nested Fiber (such as inside an Enumerator)
   #     or from a spawned Thread. Such re-entrant calls may deadlock.
   #

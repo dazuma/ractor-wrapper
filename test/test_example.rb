@@ -15,8 +15,10 @@ describe ::Ractor::Wrapper do
   end
 
   it "runs the Net::HTTP README example" do
-    response = eval_script("Net::HTTP example", "response")
+    response, r1_response, r2_response = eval_script("Net::HTTP example", "[response, r1_response, r2_response]")
     assert_kind_of(Net::HTTPOK, response)
+    assert_kind_of(Net::HTTPNotFound, r1_response)
+    assert_kind_of(Net::HTTPNotFound, r2_response)
   end
 
   it "runs the SQLite3 README example" do
