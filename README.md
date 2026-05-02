@@ -35,11 +35,11 @@ such as a database connection.
 
     +----Main-Ractor----+       +-Another-Ractor-+
     |                   |       |                |
-    |      client1      |       |                |
+    |      caller1      |       |                |
     |         |         |       |                |
     |         | ok      |       |                |
     |         v         |       |                |
-    |     my_db_conn <------X------ client2      |
+    |     my_db_conn <------X------ caller2      |
     |                   | fails |                |
     +-------------------+       +----------------+
 
@@ -49,7 +49,7 @@ a shareable proxy.
 
     +--Main-Ractor--+    +-Wrapper-Ractor-+    +-Another-Ractor-+
     |               |    |                |    |                |
-    |    client1    |    |                |    |    client2     |
+    |    caller1    |    |                |    |    caller2     |
     |       |       |    |                |    |       |        |
     |       v       |    |                |    |       v        |
     |     +----------------------------------------------+      |
@@ -60,7 +60,7 @@ a shareable proxy.
     |               |    |   my_db_conn   |    |                |
     +---------------+    +----------------+    +----------------+
 
-The wrapper provides a shareable stub object that reproduces the method
+The wrapper provides a Ractor-shareable stub object that reproduces the method
 interface of the original object, so, with a few caveats, the wrapper is almost
 fully transparent. Behind the scenes, the wrapper "runs" the wrapped object in
 a controlled single-Ractor environment, and uses port messaging to communicate
@@ -108,23 +108,19 @@ response = wrapper.stub.get("/")
 # Here, we start two Ractors, and pass the stub to each one. Each
 # Ractor can simply call methods on the stub as if it were the original
 # connection object. Internally, of course, the calls are proxied to
-# the original object via the wrapper, and execution is serialized.
+# the original object via the wrapper, and execution is serialized. The
+# returned Net::HTTPResponse values are passed through as the Ractor
+# results.
 r1 = Ractor.new(wrapper.stub) do |stub|
-  5.times do
-    stub.get("/hello")
-  end
-  :ok
+  stub.get("/hello")
 end
 r2 = Ractor.new(wrapper.stub) do |stub|
-  5.times do
-    stub.get("/ruby")
-  end
-  :ok
+  stub.get("/ruby")
 end
 
-# Wait for the two above Ractors to finish.
-r1.join
-r2.join
+# Wait for the two above Ractors to finish and retrieve their results.
+r1_response = r1.value
+r2_response = r2.value
 
 # After you stop the wrapper, you can retrieve the underlying session
 # object and access it directly again.
@@ -195,15 +191,16 @@ wrapper.join
 
 ### Simple actor example
 
-The following example demonstrates how to use `Ractor::Wrapper` to implement an
+The following example demonstrates using `Ractor::Wrapper` to implement an
 actor as a plain Ruby object. Focus on writing functionality as methods, and
-let `Ractor::Wrapper` handle all the messaging logic.
+let `Ractor::Wrapper` handle the lifecycle and communication logic.
 
 ```ruby
 # Simple actor example
 
 require "ractor/wrapper"
 
+# A simple RPN-style calculatoir class
 class SimpleCalculator
   class EmptyStackError < StandardError
   end
@@ -264,7 +261,8 @@ any Ractor.
 
 However, some objects cannot be moved to a different Ractor. This in particular
 can include certain C-based I/O objects such as database connections.
-Additionally, there are other objects that can live only in the main Ractor. If
+Additionally, there are other objects that can live only in the main Ractor,
+often because they access mutable state of classes, modules, or constants. If
 the object to be wrapped cannot be moved to its own Ractor, configure it with
 `use_current_ractor`, which will run the wrapper in a Thread in the calling
 Ractor rather than trying to move it to its own Ractor. The SQLite3 example
@@ -389,7 +387,7 @@ cases.
 
 Ractors are in general somewhat "bolted-on" to Ruby, and there are a lot of
 caveats to their use. This also applies to `Ractor::Wrapper`, which itself is
-essentially a workaround to the fact that Ruby has a lot of use cases that
+essentially a workaround for the fact that Ruby has a lot of use cases that
 simply don't play well in a Ractor world. Here we'll discuss some of the
 caveats and known issues with `Ractor::Wrapper`.
 
@@ -478,8 +476,8 @@ Development is done in GitHub at https://github.com/dazuma/ractor-wrapper.
 *   To file issues: https://github.com/dazuma/ractor-wrapper/issues.
 *   For questions and discussion, please do not file an issue. Instead, use the
     discussions feature: https://github.com/dazuma/ractor-wrapper/discussions.
-*   Pull requests are welcome, but the library is highly experimental at this
-    stage, and I recommend discussing features or design changes first before
+*   Pull requests are welcome, but since the library is experimental at this
+    stage, I recommend discussing features or design changes first before
     implementing.
 
 The library uses [toys](https://dazuma.github.io/toys) for testing and CI. To
